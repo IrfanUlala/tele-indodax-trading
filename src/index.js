@@ -5,6 +5,11 @@ import WebSocket from 'ws';
 import { calculateSignal } from './signals.js';
 import { nextMovementAlert, percentChange } from './position.js';
 import { marketOutlook } from './prediction.js';
+import { IndodaxPrivateApi, formatWallet } from './indodax.js';
+import { TradeFlow } from './trade-flow.js';
+import { formatStatus } from './status.js';
+import { formatPaperReport, loadPaperTracker } from './paper-trading.js';
+import { callbackNotice } from './callback-notice.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +51,8 @@ const threshold = Number(process.env.SIGNAL_THRESHOLD_PCT || 1);
 const cooldownMs = Number(process.env.ALERT_COOLDOWN_MINUTES || 60) * 60_000;
 const intervalMs = Math.max(10, Number(process.env.POLL_INTERVAL_SECONDS || 30)) * 1000;
 const history = [];
+const paperFile = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'paper-trading.json');
+const paperTracker = loadPaperTracker({ file: paperFile, startingCash: Number(process.env.PAPER_STARTING_IDR || 31000), fraction: 0.25 });
 let latest = null;
 let lastAlertAt = 0;
 let ws = null;
@@ -71,6 +78,11 @@ function processPrice(price, source) {
   while (history.length > 60) history.shift();
   const windowHistory = history.filter(x => now - x.at <= 15 * 60_000);
   const signal = calculateSignal(windowHistory, threshold);
+  const paperResult = paperTracker.onSignal(signal, price, now);
+  if (paperResult.action) {
+    const trade = paperResult.trade;
+    void sendTelegram(`🧪 PAPER ${trade.action === 'BUY' ? 'BELI' : 'JUAL'} SIMULASI BTC/IDR\\nHarga: Rp${price.toLocaleString('id-ID')}\\n${trade.action === 'BUY' ? `Jumlah: ${trade.btc.toLocaleString('id-ID', { maximumFractionDigits: 8 })} BTC (Rp${trade.idr.toLocaleString('id-ID')})` : `Hasil simulasi terealisasi: ${trade.realizedPnl >= 0 ? '+' : '-'}Rp${Math.abs(trade.realizedPnl).toLocaleString('id-ID')}`}\\nSinyal: ${signal.type} (${signal.changePct.toFixed(2)}%)\\nTidak ada order nyata. Laporan: /paper`);
+  }
   if (signal.type !== 'WAIT' && signal.type !== 'HOLD' && now - lastAlertAt >= cooldownMs) {
     lastAlertAt = now;
     const action = signal.type === 'WATCH_BUY' ? 'BELI' : 'JUAL';
@@ -109,15 +121,71 @@ async function pollTicker() {
 
 if (process.env.TELEGRAM_BOT_TOKEN) {
   bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
+  const tradeApi = process.env.INDODAX_API_KEY && process.env.INDODAX_API_SECRET
+    ? new IndodaxPrivateApi({ key: process.env.INDODAX_API_KEY, secret: process.env.INDODAX_API_SECRET })
+    : null;
+  const tradeFlow = tradeApi && process.env.TELEGRAM_CHAT_ID
+    ? new TradeFlow({ api: tradeApi, ownerId: process.env.TELEGRAM_CHAT_ID, send: (chatId, text, keyboard) => bot.api.sendMessage(chatId, text, keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}) })
+    : null;
+  async function sendStatus(chatId) {
+    if (String(chatId) !== String(process.env.TELEGRAM_CHAT_ID)) return;
+    let account = null;
+    try { if (tradeApi) account = await tradeApi.getInfo(); }
+    catch (error) { console.error('Status wallet read failed:', error.message); }
+    const current = history.at(-1)?.price ?? latest?.price;
+    const prior = history.length > 1 ? history.at(-2).price : null;
+    const status = formatStatus({ latest, previous: prior, account, marketConnected: ws?.readyState === WebSocket.OPEN, history, position });
+    await bot.api.sendMessage(chatId, status.text, { reply_markup: { inline_keyboard: status.keyboard } });
+  }
+  bot.command('paper', async ctx => {
+    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
+    const report = paperTracker.report(latest?.price);
+    await ctx.reply(formatPaperReport(report, latest?.price));
+  });
+  bot.command('wallet', async ctx => {
+    if (!process.env.TELEGRAM_CHAT_ID || String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
+    if (!process.env.INDODAX_API_KEY || !process.env.INDODAX_API_SECRET) return ctx.reply('Akses saldo belum dikonfigurasi. Periksa kredensial Indodax secara lokal.');
+    try {
+      const api = new IndodaxPrivateApi({ key: process.env.INDODAX_API_KEY, secret: process.env.INDODAX_API_SECRET });
+      const account = await api.getInfo();
+      await ctx.reply(formatWallet(account, { price: latest?.price, entryPrice: position?.entryPrice }));
+    } catch (error) {
+      console.error('Indodax wallet read failed:', error.message);
+      await ctx.reply('Gagal membaca saldo Indodax. Periksa izin API V2/koneksi, lalu coba lagi.');
+    }
+  });
+  bot.command('buy', async ctx => {
+    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
+    if (!tradeFlow) return ctx.reply('Trading belum dikonfigurasi.');
+    try { await tradeFlow.start(ctx.chat.id, 'BUY'); }
+    catch (error) { console.error('Trade start failed:', error.message); await ctx.reply('Gagal memulai order beli. Periksa koneksi/izin API lalu coba lagi.'); }
+  });
+  bot.command('sell', async ctx => {
+    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
+    if (!tradeFlow) return ctx.reply('Trading belum dikonfigurasi.');
+    try { await tradeFlow.start(ctx.chat.id, 'SELL'); }
+    catch (error) { console.error('Trade start failed:', error.message); await ctx.reply('Gagal memulai order jual. Periksa koneksi/izin API lalu coba lagi.'); }
+  });
   bot.on('callback_query:data', async ctx => {
     if (String(ctx.callbackQuery.message?.chat?.id) !== String(process.env.TELEGRAM_CHAT_ID)) return ctx.answerCallbackQuery({ text: 'Chat tidak diizinkan.' });
     const data = ctx.callbackQuery.data;
     let answer = 'Tombol tidak dikenali.';
-    const match = data.match(/^pos_(sell|hold)_(-?[0-9]+)$/);
-    if (match) answer = acknowledgePosition(match[2], match[1]);
-    else if (data === 'proposal_ignore') answer = 'Sinyal diabaikan.';
-    else if (data.startsWith('proposal_')) answer = 'Pilihan dicatat saja; bot ini tidak mengeksekusi transaksi.';
-    await ctx.answerCallbackQuery({ text: answer });
+    const pct = data.match(/^trade_pct:([^:]+):(25|50|75|100)$/);
+    const confirm = data.match(/^trade_confirm:(.+)$/);
+    const cancel = data.match(/^trade_cancel:(.+)$/);
+    if (pct && tradeFlow) answer = await tradeFlow.choosePercent(ctx.chat.id, Number(pct[2]));
+    else if (confirm && tradeFlow) answer = await tradeFlow.confirm(ctx.chat.id, confirm[1]);
+    else if (cancel && tradeFlow) answer = tradeFlow.cancel(ctx.chat.id, cancel[1]);
+    else if (data === 'status_buy' && tradeFlow) { await tradeFlow.start(ctx.chat.id, 'BUY'); answer = 'Pilih persentase beli dari panel di bawah.'; }
+    else if (data === 'status_sell' && tradeFlow) { await tradeFlow.start(ctx.chat.id, 'SELL'); answer = 'Pilih persentase jual dari panel di bawah.'; }
+    else if (data === 'status_refresh') { await sendStatus(ctx.chat.id); answer = 'Status diperbarui.'; }
+    else {
+      const match = data.match(/^pos_(sell|hold)_(-?[0-9]+)$/);
+      if (match) answer = acknowledgePosition(match[2], match[1]);
+      else if (data === 'proposal_ignore') answer = 'Sinyal diabaikan.';
+      else if (data.startsWith('proposal_')) answer = 'Pilihan dicatat saja; bot ini tidak mengeksekusi transaksi.';
+    }
+    await ctx.answerCallbackQuery({ text: callbackNotice(answer) });
     await ctx.api.sendMessage(process.env.TELEGRAM_CHAT_ID, answer);
   });
   bot.command('beli', async ctx => {
@@ -137,830 +205,87 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
   });
   bot.command('status', async ctx => {
     if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
+    try { await sendStatus(ctx.chat.id); }
+    catch (error) { console.error('Status render failed:', error.message); await ctx.reply('Gagal memperbarui status saat ini.'); }
   });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti atau nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.command('status', async ctx => {
-    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const outlook = marketOutlook(history);
-    const lines = ['📊 BTC/IDR — STATUS', latest ? `Harga terakhir: Rp${latest.price.toLocaleString('id-ID')}` : 'Harga terakhir: belum tersedia'];
-    lines.push(`Koneksi market: ${ws?.readyState === WebSocket.OPEN ? 'tersambung' : 'terputus'}`);
-    lines.push(position ? `Harga beli tercatat: Rp${position.entryPrice.toLocaleString('id-ID')}\nPerubahan dari entry: ${percentChange(position.entryPrice, latest?.price)?.toFixed(2) ?? '—'}%${pendingSell ? '\nStatus: menunggu penutupan posisi manual (/selesai)' : ''}` : 'Posisi: belum dicatat. Setelah beli manual, catat dengan /beli <harga_IDR>.');
-    lines.push(`Arah pasar 15 menit: ${outlook.direction}${outlook.changePct === null ? '' : ` (${outlook.changePct >= 0 ? '+' : ''}${outlook.changePct.toFixed(2)}%)`}`);
-    lines.push(`Dasar: ${outlook.reason}`, 'Catatan: ini indikasi sederhana dari perubahan harga terkini, bukan prediksi pasti ou nasihat keuangan.');
-    await ctx.reply(lines.join('\n\n'));
-  });
-  bot.catch(error => console.error('Telegram bot error:', error.message));
-  void bot.start().catch(error => console.error('Telegram polling error:', error.message));
-}
 
-connectMarketSocket();
-void pollTicker();
-const pollTimer = setInterval(() => void pollTicker(), intervalMs);
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
-  clearInterval(pollTimer); clearTimeout(wsRetry); ws?.close(); bot?.stop(); process.exit(0);
-});
 
- function trackPrice(price, source) {
-  if (!Number.isFinite(price) || price <= 0) return;
-  watchPosition(price);
-  const now = Date.now();
-  latest = { pair: 'BTC/IDR', price, source, observedAt: new Date(now).toISOString() };
-  history.push({ price, at: now });
-  while (history.length > 60) history.shift();
-  const windowHistory = history.filter(x => now - x.at <= 15 * 60_000);
-  const signal = calculateSignal(windowHistory, threshold);
-  if (signal.type !== 'WAIT' && signal.type !== 'HOLD' && now - lastAlertAt >= cooldownMs) {
-    lastAlertAt = now;
-    const action = signal.type === 'WATCH_BUY' ? 'BELI' : 'JUAL';
-    sendTelegram(`BTC/IDR ${signal.type}\nHarga: Rp${price.toLocaleString('id-ID')}\n${signal.reason}\n\nIni hanya sinyal pantauan, bukan nasihat keuangan. Bot tidak membuat order.`, [[{ text: `Setujui ${action} (catat saja)`, callback_data: `proposal_${action.toLowerCase()}` }, { text: 'Abaikan', callback_data: 'proposal_ignore' }]]);
-  }
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
   bot.catch(error => console.error('Telegram bot error:', error.message));
   void bot.start().catch(error => console.error('Telegram polling error:', error.message));

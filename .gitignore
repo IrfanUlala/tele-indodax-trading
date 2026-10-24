@@ -7,3 +7,4 @@ logs/
 .pm2/
 .DS_Store
 coverage/
+data/position.json
