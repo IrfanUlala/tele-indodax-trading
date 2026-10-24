@@ -1,0 +1,21 @@
+{
+  "name": "coint-trading",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "BTC/IDR market monitor with Telegram alerts and human-confirmed trade proposals",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "grammy": "^1.46.0",
+    "ws": "^8.18.3"
+  }
+}
