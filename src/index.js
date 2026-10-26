@@ -111,7 +111,8 @@ function processPrice(price, source) {
   while (history.length > 60) history.shift();
   const windowHistory = history.filter(x => now - x.at <= 15 * 60_000);
   const signal = calculateSignal(windowHistory, threshold);
-  const paperResult = paperTracker.onSignal(signal, price, now);
+  const outlook = marketOutlook(windowHistory);
+  const paperResult = paperTracker.onSignal(signal, price, now, outlook.direction);
   if (paperResult.action) {
     const trade = paperResult.trade;
     void sendTelegram(`🧪 PAPER ${trade.action === 'BUY' ? 'BELI' : 'JUAL'} SIMULASI BTC/IDR
