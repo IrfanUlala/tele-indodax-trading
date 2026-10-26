@@ -83,17 +83,18 @@ test('trade flow requires explicit single-use confirmation and uses available ba
   const sent = [];
   let orders = 0;
   const api = {
-    async getInfo() { return { balances: [
+    async getInfo() { return { canTrade: true, balances: [
       { asset: 'IDR', free: '100000', locked: '40000' },
       { asset: 'BTC', free: '0.01', locked: '0.02' },
     ] }; },
     async createOrder() { orders += 1; return { orderId: 'mock' }; },
   };
-  const flow = new TradeFlow({ api, send: async (id, text, keyboard) => sent.push({ id, text, keyboard }), ownerId: '123', now: () => 1000 });
+  const flow = new TradeFlow({ api, send: (id, text, keyboard) => { sent.push({ id, text, keyboard }); return Promise.resolve(); }, ownerId: '123', now: () => 1000, liveEnabled: true, maxOrderIdr: 100000, maxDeviationPct: 1, pairMetadata: { quantity_increment: '0.00000001', trade_min_traded_currency: 0.0001, trade_min_base_currency: 50000 }, getMarketPrice: async () => 1000000000 });
   await flow.start('123', 'BUY');
   assert.match(sent.at(-1).text, /100\.000 IDR/);
   assert.equal(orders, 0);
-  await flow.choosePercent('123', 50);
+  const token = sent.at(-1).keyboard[0][0].callback_data.split(':')[1];
+  await flow.choosePercent('123', token, 50);
   assert.match(sent.at(-1).text, /Rp50\.000/);
   assert.equal(orders, 0);
   const confirmationToken = sent.at(-1).keyboard[0][0].callback_data.split(':')[1];
@@ -105,13 +106,42 @@ test('trade flow requires explicit single-use confirmation and uses available ba
   assert.equal(orders, 1);
 });
 
+test('trade flow requires callback token for percentage selection', async () => {
+  const { TradeFlow } = await import('../src/trade-flow.js');
+  const sent = [];
+  const flow = new TradeFlow({ api: { async getInfo() { return { balances: [{ asset: 'IDR', free: '100000', locked: '0' }], canTrade: true }; } }, send: (id, text, keyboard) => { sent.push({ text, keyboard }); return Promise.resolve(); }, ownerId: '123', now: () => 1000, liveEnabled: true, maxOrderIdr: 1000000, maxDeviationPct: 5, getMarketPrice: async () => 600000000 });
+  await flow.start('123', 'BUY');
+  assert.ok(sent.length > 0);
+  const keyboard = sent.at(-1)?.keyboard;
+  assert.ok(keyboard);
+  const token = keyboard[0][0].callback_data.split(':')[1];
+  assert.match(await flow.choosePercent('123', token, 25), /KONFIRMASI ORDER/);
+});
+
+test('trade flow rejects wrong callback token', async () => {
+  const { TradeFlow } = await import('../src/trade-flow.js');
+  const sent = [];
+  const flow = new TradeFlow({ api: { async getInfo() { return { balances: [{ asset: 'IDR', free: '100000', locked: '0' }], canTrade: true }; } }, send: (id, text, keyboard) => { sent.push({ text, keyboard }); return Promise.resolve(); }, ownerId: '123', now: () => 1000, liveEnabled: true, maxOrderIdr: 1000000, maxDeviationPct: 5, getMarketPrice: async () => 600000000 });
+  await flow.start('123', 'BUY');
+  assert.match(await flow.choosePercent('123', 'wrong-token', 25), /tidak berlaku/i);
+});
+
+test('live order flow is disabled unless explicit live flag and limits are configured', async () => {
+  const { TradeFlow } = await import('../src/trade-flow.js');
+  const sent = [];
+  const flow = new TradeFlow({ api: { async getInfo() { return { balances: [{ asset: 'IDR', free: '100000', locked: '0' }] }; } }, send: async (id, text) => sent.push(text), ownerId: '123' });
+  assert.match(await flow.start('123', 'BUY'), /dinonaktifkan/i);
+  assert.equal(sent.length, 0);
+});
+
 test('trade flow expires pending confirmations', async () => {
   const { TradeFlow } = await import('../src/trade-flow.js');
   let now = 1000;
   const sent = [];
-  const flow = new TradeFlow({ api: { async getInfo() { return { balances: [{ asset: 'IDR', free: 100000, locked: 0 }] }; }, async createOrder() { throw Error('should not trade'); } }, send: async (id, text, keyboard) => sent.push({ text, keyboard }), ownerId: '123', now: () => now, ttlMs: 500 });
+  const flow = new TradeFlow({ api: { async getInfo() { return { canTrade: true, balances: [{ asset: 'IDR', free: '100000', locked: '0' }] }; }, async createOrder() { throw Error('should not trade'); } }, send: (id, text, keyboard) => { sent.push({ text, keyboard }); return Promise.resolve(); }, ownerId: '123', now: () => now, ttlMs: 500, liveEnabled: true, maxOrderIdr: 100000, maxDeviationPct: 5, getMarketPrice: async () => 600000000 });
   await flow.start('123', 'BUY');
-  await flow.choosePercent('123', 25);
+  const token = sent.at(-1).keyboard[0][0].callback_data.split(':')[1];
+  await flow.choosePercent('123', token, 25);
   const confirmationToken = sent.at(-1).keyboard[0][0].callback_data.split(':')[1];
   now += 501;
   const result = await flow.confirm('123', confirmationToken);
@@ -158,6 +188,3 @@ test('wallet handler is registered and reads the private account API', async () 
   assert.match(source, /bot\.command\('wallet'/);
   assert.match(source, /getInfo\(\)/);
 });
-
-
-

@@ -6,15 +6,34 @@ import { calculateSignal } from './signals.js';
 import { nextMovementAlert, percentChange } from './position.js';
 import { marketOutlook } from './prediction.js';
 import { IndodaxPrivateApi, formatWallet } from './indodax.js';
-import { TradeFlow } from './trade-flow.js';
+import { TradeFlow, OrderControl, validateLiveConfig } from './trade-flow.js';
 import { formatStatus } from './status.js';
 import { formatPaperReport, loadPaperTracker } from './paper-trading.js';
+import { formatAltcoinPaperReport, formatAltcoinPaperTrade, loadAltcoinPaperTracker } from './altcoin-paper.js';
 import { callbackNotice } from './callback-notice.js';
+import { rankIdrPairs, scanTopPairs, formatAltcoinReport as renderAltcoinReport, formatAltcoinAlert } from './altcoin-scanner.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const dataFile = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'position.json');
+const dataDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data');
+const logDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'logs');
+const orderControl = new OrderControl({ file: path.join(dataDir, 'order-control.json'), auditFile: path.join(logDir, 'orders.jsonl') });
+const liveConfig = validateLiveConfig(process.env);
+const btcTicker = async () => {
+  const response = await fetch('https://indodax.com/api/ticker/btcidr', { signal: AbortSignal.timeout(8000) });
+  if (!response.ok) throw new Error(`Ticker HTTP ${response.status}`);
+  const data = await response.json();
+  return Number(data?.ticker?.last);
+};
+const fetchBtcPairMetadata = async () => {
+  const response = await fetch('https://indodax.com/api/pairs', { signal: AbortSignal.timeout(8000) });
+  if (!response.ok) throw new Error(`Pair metadata HTTP ${response.status}`);
+  const pairs = await response.json();
+  return pairs.find(pair => pair.id === 'btcidr') ?? null;
+};
+const pairMetadata = await fetchBtcPairMetadata().catch(error => { console.error('BTC pair metadata unavailable; live orders will be blocked:', error.message); return null; });
+const dataFile = path.join(dataDir, 'position.json');
 function readPosition() { try { return JSON.parse(fs.readFileSync(dataFile, 'utf8')); } catch { return null; } }
 function writePosition(value) { fs.mkdirSync(path.dirname(dataFile), { recursive: true }); fs.writeFileSync(dataFile, JSON.stringify(value, null, 2), { mode: 0o600 }); }
 let position = readPosition();
@@ -51,8 +70,15 @@ const threshold = Number(process.env.SIGNAL_THRESHOLD_PCT || 1);
 const cooldownMs = Number(process.env.ALERT_COOLDOWN_MINUTES || 60) * 60_000;
 const intervalMs = Math.max(10, Number(process.env.POLL_INTERVAL_SECONDS || 30)) * 1000;
 const history = [];
+const altcoinHistories = new Map();
+const altcoinCandidateState = new Set();
+let latestAltcoinScan = [];
+let altcoinLastScanAt = null;
 const paperFile = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'paper-trading.json');
 const paperTracker = loadPaperTracker({ file: paperFile, startingCash: Number(process.env.PAPER_STARTING_IDR || 31000), fraction: 0.25 });
+const altcoinPaperFile = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'altcoin-paper-trading.json');
+const altcoinPaperTracker = loadAltcoinPaperTracker({ file: altcoinPaperFile, startingCash: Number(process.env.ALTCOIN_PAPER_STARTING_IDR || 31000), fraction: 0.25, stopDropPct: 1 });
+const lastAltcoinPaperPrices = new Map();
 let latest = null;
 let lastAlertAt = 0;
 let ws = null;
@@ -63,9 +89,11 @@ let lastWsMessageAt = null;
 app.get('/health', (_req, res) => res.json({ ok: true, pair: 'BTC/IDR', latest, websocketConnected: ws?.readyState === WebSocket.OPEN, lastWsMessageAt }));
 app.listen(port, '127.0.0.1', () => console.log(`Health endpoint on 127.0.0.1:${port}/health`));
 
-async function sendTelegram(text, keyboard) {
+async function sendTelegram(text, keyboard, extra = {}) {
   if (!bot || !process.env.TELEGRAM_CHAT_ID) return;
-  try { await bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, text, keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}); }
+  const options = { ...extra };
+  if (keyboard) options.reply_markup = { inline_keyboard: keyboard };
+  try { await bot.api.sendMessage(process.env.TELEGRAM_CHAT_ID, text, options); }
   catch (error) { console.error('Telegram send failed:', error.message); }
 }
 
@@ -119,14 +147,71 @@ async function pollTicker() {
   } catch (error) { console.error('Ticker poll failed:', error.message); }
 }
 
+async function pollAltcoins() {
+  try {
+    const response = await fetch('https://indodax.com/api/tickers', { signal: AbortSignal.timeout(12000) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const now = Date.now();
+    const topPairs = rankIdrPairs(payload, 10);
+    for (const pair of topPairs) {
+      const tickerKey = Object.keys(payload.tickers ?? {}).find(key => key.replace('_', '').toLowerCase() === pair.pair);
+      const price = Number(payload.tickers?.[tickerKey]?.last);
+      if (!(price > 0 && Number.isFinite(price))) continue;
+      const points = altcoinHistories.get(pair.symbol) ?? [];
+      points.push({ price, at: now });
+      while (points.length > 0 && now - points[0].at > 20 * 60_000) points.shift();
+      altcoinHistories.set(pair.symbol, points);
+    }
+    latestAltcoinScan = scanTopPairs(payload, altcoinHistories, { now, limit: 10, windowMs: 15 * 60_000, thresholdPct: threshold });
+    for (const item of latestAltcoinScan) {
+      const price = altcoinHistories.get(item.symbol)?.at(-1)?.price;
+      if (!(price > 0)) continue;
+      const points = altcoinHistories.get(item.symbol) ?? [];
+      const recent = points.filter(point => now - point.at <= 15 * 60_000 && now >= point.at);
+      const changePct = recent.length >= 3 ? ((recent.at(-1).price - recent[0].price) / recent[0].price) * 100 : null;
+      const trendConfirmed = recent.length >= 4 && recent.at(-1).price > recent.at(-2).price && recent.at(-2).price > recent.at(-3).price;
+      const outlook = marketOutlook(recent, 15 * 60_000, 0.2).direction;
+      const result = altcoinPaperTracker.update({ symbol: item.symbol, price, changePct, trendConfirmed, outlook, at: now });
+      lastAltcoinPaperPrices.set(item.symbol, price);
+      if (result.action) {
+        void sendTelegram(formatAltcoinPaperTrade(result.trade), undefined, { parse_mode: 'Markdown' });
+      }
+    }
+    altcoinLastScanAt = new Date(now).toISOString();
+    const currentCandidates = new Set(latestAltcoinScan.filter(item => item.changePct !== null).map(item => item.symbol));
+    for (const item of latestAltcoinScan) {
+      if (item.changePct === null || altcoinCandidateState.has(item.symbol)) continue;
+      altcoinCandidateState.add(item.symbol);
+      const samples = altcoinHistories.get(item.symbol) ?? [];
+      const outlook = marketOutlook(samples, 15 * 60_000, 0.2);
+      void sendTelegram(formatAltcoinAlert({ ...item, outlook }), undefined, { parse_mode: 'Markdown' });
+    }
+    for (const symbol of altcoinCandidateState) if (!currentCandidates.has(symbol)) altcoinCandidateState.delete(symbol);
+  } catch (error) { console.error('Altcoin ticker scan failed:', error.message); }
+}
+
+function formatAltcoinReport() {
+  return renderAltcoinReport({ items: latestAltcoinScan, thresholdPct: threshold, updatedAt: altcoinLastScanAt });
+}
+
+void pollAltcoins();
+const altcoinTimer = setInterval(() => void pollAltcoins(), Math.max(intervalMs, 60_000));
+void altcoinTimer;
+
 if (process.env.TELEGRAM_BOT_TOKEN) {
   bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
   const tradeApi = process.env.INDODAX_API_KEY && process.env.INDODAX_API_SECRET
     ? new IndodaxPrivateApi({ key: process.env.INDODAX_API_KEY, secret: process.env.INDODAX_API_SECRET })
     : null;
   const tradeFlow = tradeApi && process.env.TELEGRAM_CHAT_ID
-    ? new TradeFlow({ api: tradeApi, ownerId: process.env.TELEGRAM_CHAT_ID, send: (chatId, text, keyboard) => bot.api.sendMessage(chatId, text, keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}) })
+    ? new TradeFlow({ api: tradeApi, ownerId: process.env.TELEGRAM_CHAT_ID, liveEnabled: liveConfig, maxOrderIdr: Number(process.env.MAX_ORDER_IDR), maxDeviationPct: Number(process.env.MAX_PRICE_DEVIATION_PCT), pairMetadata, control: orderControl, auditFile: path.join(logDir, 'orders.jsonl'), getMarketPrice: btcTicker, send: (chatId, text, keyboard) => bot.api.sendMessage(chatId, text, keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}) })
     : null;
+  const ownerOnly = ctx => String(ctx.chat.id) === String(process.env.TELEGRAM_CHAT_ID);
+  bot.command('pause', async ctx => { if (ownerOnly(ctx)) { orderControl.pause(); await ctx.reply('Trading dijeda; order baru diblokir.'); } });
+  bot.command('resume', async ctx => { if (ownerOnly(ctx)) { try { orderControl.resume(); await ctx.reply('Trading dilanjutkan sesuai LIVE_TRADING_ENABLED dan batas konfigurasi.'); } catch (error) { await ctx.reply(error.message); } } });
+  bot.command('killswitch', async ctx => { if (ownerOnly(ctx)) { orderControl.kill(); await ctx.reply('KILL SWITCH aktif; semua order baru diblokir.'); } });
+  bot.command('resolveorder', async ctx => { if (ownerOnly(ctx)) { if (!orderControl.state.uncertain) return ctx.reply('Tidak ada order berstatus TIDAK PASTI.'); orderControl.resolveUncertain(); await ctx.reply('Status ditandai telah diperiksa manual. Trading tetap dijeda; gunakan /resume setelah memastikan status order di Indodax.'); } });
   async function sendStatus(chatId) {
     if (String(chatId) !== String(process.env.TELEGRAM_CHAT_ID)) return;
     let account = null;
@@ -137,10 +222,16 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
     const status = formatStatus({ latest, previous: prior, account, marketConnected: ws?.readyState === WebSocket.OPEN, history, position });
     await bot.api.sendMessage(chatId, status.text, { reply_markup: { inline_keyboard: status.keyboard } });
   }
+  bot.command('altcoins', async ctx => {
+    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
+    await ctx.reply(formatAltcoinReport());
+  });
   bot.command('paper', async ctx => {
     if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
     const report = paperTracker.report(latest?.price);
     await ctx.reply(formatPaperReport(report, latest?.price));
+    const prices = Object.fromEntries(Object.keys(altcoinPaperTracker.state.positions).map(symbol => [symbol, lastAltcoinPaperPrices.get(symbol)]));
+    await ctx.reply(formatAltcoinPaperReport(altcoinPaperTracker.report(prices)), { parse_mode: 'Markdown' });
   });
   bot.command('wallet', async ctx => {
     if (!process.env.TELEGRAM_CHAT_ID || String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
@@ -173,7 +264,7 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
     const pct = data.match(/^trade_pct:([^:]+):(25|50|75|100)$/);
     const confirm = data.match(/^trade_confirm:(.+)$/);
     const cancel = data.match(/^trade_cancel:(.+)$/);
-    if (pct && tradeFlow) answer = await tradeFlow.choosePercent(ctx.chat.id, Number(pct[2]));
+    if (pct && tradeFlow) answer = await tradeFlow.choosePercent(ctx.chat.id, pct[1], Number(pct[2]));
     else if (confirm && tradeFlow) answer = await tradeFlow.confirm(ctx.chat.id, confirm[1]);
     else if (cancel && tradeFlow) answer = tradeFlow.cancel(ctx.chat.id, cancel[1]);
     else if (data === 'status_buy' && tradeFlow) { await tradeFlow.start(ctx.chat.id, 'BUY'); answer = 'Pilih persentase beli dari panel di bawah.'; }
