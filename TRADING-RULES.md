@@ -1,26 +1,72 @@
-# Trading rules and risk policy
+# Trading rules dan risk policy
 
-This is general risk guidance, not personalized financial advice. Crypto is volatile; losses can exceed expectations. Start with monitoring and paper trading only. The project does not currently execute orders.
+General risk guidance, bukan saran keuangan personal. Crypto volatile; kerugian bisa melebihi ekspektasi. Mulai dengan monitor & paper trading saja. Project ini punya live trading manual BTC/IDR dengan safeguard eksplisit.
 
-## Operating rules
+## Aturan operasional
 
-1. **One asset/pair only:** BTC/IDR (`btcidr`). Never accept a user-supplied pair in execution paths.
-2. **Human decision required:** signals are observations, not buy/sell recommendations. Each proposed action must be reviewed by a human; current Telegram button only acknowledges/ignores and cannot trade.
-3. **Paper test first:** record timestamp, price, signal, hypothetical entry/exit, fees, spread and slippage. Evaluate across different market regimes for at least several weeks before considering live funds.
-4. **Risk only what you can lose:** decide a small maximum portfolio allocation and maximum loss per trade in advance. Never borrow, use leverage, or average down to rescue a losing position.
-5. **Predefine entry, invalidation and exit:** before any hypothetical entry, document why, invalidation/stop level, target, time horizon, and maximum loss. Do not move a stop farther away after entry.
-6. **Account for costs:** include exchange trading fees, bid/ask spread, slippage, minimum order and price/quantity increments. A gross gain is not a net gain.
-7. **Avoid noisy signals:** a short-window percentage change is not predictive. Confirm data freshness and independent context; avoid acting on stale, missing, abnormal or conflicting prices.
-8. **Cooldown and rate limits:** do not repeatedly act on the same signal. Respect exchange limits and stop on errors; do not retry a trade blindly.
-9. **Protect credentials:** API key should have only the minimum required permissions; disable withdrawal permissions. Store secrets in `.env` with restrictive local permissions (`chmod 600 .env`), never commit/log them, and rotate if exposed.
-10. **Fail closed:** on data outage, clock issues, Telegram/API errors, or unexpected responses, pause and alert; never infer a trade or submit an order.
-11. **Manual reconciliation:** verify account balances and order status in the official exchange interface. Bot acknowledgements are not proof of an executed order.
-12. **Operational limit:** PM2 restart is for service availability, not trading continuity; inspect logs and health after reboot. Maintain a kill switch (`pm2 stop coint-trading`).
+1. **Satu asset:** BTC/IDR (`btcidr`) saja. Paper altcoin IDR pairs top-10 volume (simulasi, no real order).
+2. **Keputusan manual:** live order `/buy` `/sell` butuh 2x konfirmasi (review + callback). Paper trading otomatis, hanya alert.
+3. **Paper test dulu:** record entry/exit, fee, spread, slippage. Validasi 30+ hari walk-forward sebelum real trading.
+4. **Risiko terukur:** tentukan max portfolio % dan max loss per trade. Jangan leverage, jangan rescue dengan average down.
+5. **Entry/exit predefine:** dokumentasikan alasan, stop level, target, horizon, max loss. Jangan ubah stop setelah entry.
+6. **Hitung biaya:** fee maker/taker, bid/ask, slippage, minimum order, presisi Indodax. Gross gain bukan net gain.
+7. **Sinyal berkualitas:** short-window % bukan prediktif. Validasi independen; tolak harga stale/missing/abnormal.
+8. **Cooldown & rate limit:** altcoin cooldown 15 menit (simulasi); live BTC manual (no auto-repeat). Hormat exchange limit.
+9. **Credential aman:** API key trading-only, withdrawal disabled. `.env` mode 0600, jangan commit/log, rotate if exposed.
+10. **Fail closed:** data outage/error → pause & alert, jangan infer order. Timeout/network → status TIDAK PASTI.
+11. **Rekonsiliasi manual:** verifikasi balance & order di exchange official. Bot ack bukan bukti executed.
+12. **Kill switch:** `/pause` `/killswitch` milik owner. `pm2 stop` backup. Inspect log setelah reboot.
 
-## Signal currently implemented
+## Entry & exit rules
 
-The code compares the first and latest BTC/IDR observations within a rolling 15-minute sample against `SIGNAL_THRESHOLD_PCT` (default 1%). It labels threshold crossings `WATCH_BUY` or `WATCH_SELL`; otherwise `HOLD`/`WAIT`. This simple heuristic does not establish trend, estimate probability, account for fees, or predict the future. Thresholds are configurable and unvalidated; alerts have a cooldown. Do not use it as a strategy without independent backtesting and paper trading.
+### BTC/IDR live manual
+- **Entry:** `/buy`, pilih 25%/50%/75%/100% saldo IDR tersedia, review harga, konfirmasi callback (TTL 2 min). MARKET order, real order sent.
+- **Exit:** `/sell`, pilih persentase holding BTC, review, konfirmasi (TTL 2 min). MARKET order.
+- **Safeguard:** harga saat confirm harus dalam ±5% (configurable `MAX_PRICE_DEVIATION_PCT`) dari harga di start. Nominal max `MAX_ORDER_IDR`. Timeout/network → TIDAK PASTI, user cek manual `/resolveorder`.
+- **Limit:** non-repeating manual order saja; tidak ada otomatis buy/sell.
 
-## Before any live trading feature
+### BTC/IDR paper trading
+- **Signal:** 15-min rolling, jika latest ≥ oldest + 1% (`SIGNAL_THRESHOLD_PCT`) naik 3x beruntun → WATCH_BUY. Turun 3x → WATCH_SELL. Cooldown 15 menit per pair.
+- **Entry:** WATCH_BUY + 3 sample beruntun naik → buy 25% cash simulasi. Record entry price, timestamp.
+- **Hold naik:** jika market outlook NAIK (3+ sample terbaru naik), tahan. Jangan jual sampai outlook ≠ NAIK.
+- **Exit 1:** outlook NETRAL/TURUN sebelum +3% → jual 100%.
+- **Exit 2:** setelah +3% target reached, hold sampai outlook NAIK. Saat NETRAL/TURUN atau trailing 1% dari peak → jual.
+- **Stop loss:** sebelum +3%, jika outlook ≠ NAIK dan loss 1% dari entry → jual.
+- **Cooldown:** 15 menit antarorder untuk pair yang sama.
 
-Require a separately reviewed implementation with explicit order sizing caps, price/quantity validation, fee/slippage-aware limits, duplicate-order protection, expiry, confirmation bound to an exact pair/side/quantity/limit price and short-lived nonce, authorized Telegram chat/user checks, audit log, reconciliation, and an emergency disable. Use an API key with trading-only permissions and withdrawals disabled. Obtain explicit user approval for the precise execution policy. No such feature is included here.
+### Altcoin IDR paper (top-10 volume)
+- **Entry:** 15-min rolling, entry ≥ 1% + 3 sample naik → buy 25% cash (jika belum hold).
+- **Hold:** sama BTC (outlook NAIK → tahan).
+- **Exit 1:** turun 1% dari entry sebelum +3% + outlook ≠ NAIK → jual.
+- **Exit 2:** +3% target reached, hold sampai NETRAL/TURUN atau trailing 1% dari peak.
+- **Stop:** 1% loss sebelum target, jika outlook ≠ NAIK.
+- **Cooldown:** 15 menit per pair.
+
+## Live trading safeguard (implemented Fase 1)
+
+✅ **Enable flag:** `LIVE_TRADING_ENABLED=false` default. Require `true` + `MAX_ORDER_IDR` > 0 + `MAX_PRICE_DEVIATION_PCT` > 0 untuk aktif.
+
+✅ **Harga deviasi:** review harga di start, confirm harga harus dalam batas. Tolak jika melompat.
+
+✅ **Presisi order:** jumlah jual BTC divalidasi sesuai `quantity_increment` & `trade_min_traded_currency` pair.
+
+✅ **Token UUID:** setiap `/buy` `/sell` generate UUID; callback wajib kirim token valid.
+
+✅ **TTL & expiry:** order TTL 2 menit; callback tidak berlaku jika expired atau token salah.
+
+✅ **Status TIDAK PASTI:** timeout/500 error → pause & mark uncertain. User cek manual Indodax, `/resolveorder` setelah verifikasi.
+
+✅ **Kill switch:** `/pause` `/resume` `/killswitch` milik owner (chat ID match). State atomik di `data/order-control.json`.
+
+✅ **Audit log:** semua event (intent_started, order_created, order_error, order_uncertain, order_resolved) di `logs/orders.jsonl`.
+
+✅ **Fake API test:** tes gunakan mock API, bukan real order.
+
+## Sebelum real trading
+
+- Independen validasi Indodax API V2: presisi, minimum, fee, rate limit, error handling.
+- Paper trading 30+ hari, berbagai regime pasar.
+- Hitung net profit setelah fee/tax/slippage.
+- Jangan percaya signal atau backtest; ini heuristic.
+- Withdraw permission boleh enable setelah order verified & tested.
+- Rotate API key jika exposed.

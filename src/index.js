@@ -50,7 +50,12 @@ function watchPosition(price) {
   position.lastNotifiedTier = tier;
   writePosition(position);
   const direction = tier > 0 ? 'NAIK' : 'TURUN';
-  const text = `BTC/IDR — PERGERAKAN ${direction} ${Math.abs(tier) * movementStep}% dari harga beli manual\\nHarga beli: Rp${position.entryPrice.toLocaleString('id-ID')}\\nHarga sekarang: Rp${price.toLocaleString('id-ID')}\\nPerubahan: ${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)}%\\n\\nIni notifikasi perubahan, bukan rekomendasi. Pilih tindakan manual:`;
+  const text = `BTC/IDR — PERGERAKAN ${direction} ${Math.abs(tier) * movementStep}% dari harga beli manual
+Harga beli: Rp${position.entryPrice.toLocaleString('id-ID')}
+Harga sekarang: Rp${price.toLocaleString('id-ID')}
+Perubahan: ${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)}%
+
+Ini notifikasi perubahan, bukan rekomendasi. Pilih tindakan manual:`;
   void sendTelegram(text, [[{ text: 'Jual (catat manual)', callback_data: `pos_sell_${tier}` }, { text: 'Pertahankan', callback_data: `pos_hold_${tier}` }]]);
 }
 
@@ -109,7 +114,11 @@ function processPrice(price, source) {
   const paperResult = paperTracker.onSignal(signal, price, now);
   if (paperResult.action) {
     const trade = paperResult.trade;
-    void sendTelegram(`🧪 PAPER ${trade.action === 'BUY' ? 'BELI' : 'JUAL'} SIMULASI BTC/IDR\\nHarga: Rp${price.toLocaleString('id-ID')}\\n${trade.action === 'BUY' ? `Jumlah: ${trade.btc.toLocaleString('id-ID', { maximumFractionDigits: 8 })} BTC (Rp${trade.idr.toLocaleString('id-ID')})` : `Hasil simulasi terealisasi: ${trade.realizedPnl >= 0 ? '+' : '-'}Rp${Math.abs(trade.realizedPnl).toLocaleString('id-ID')}`}\\nSinyal: ${signal.type} (${signal.changePct.toFixed(2)}%)\\nTidak ada order nyata. Laporan: /paper`);
+    void sendTelegram(`🧪 PAPER ${trade.action === 'BUY' ? 'BELI' : 'JUAL'} SIMULASI BTC/IDR
+Harga: Rp${price.toLocaleString('id-ID')}
+${trade.action === 'BUY' ? `Jumlah: ${trade.btc.toLocaleString('id-ID', { maximumFractionDigits: 8 })} BTC (Rp${trade.idr.toLocaleString('id-ID')})` : `Hasil simulasi terealisasi: ${trade.realizedPnl >= 0 ? '+' : '-'}Rp${Math.abs(trade.realizedPnl).toLocaleString('id-ID')}`}
+Sinyal: ${signal.type} (${signal.changePct.toFixed(2)}%)
+Tidak ada order nyata. Laporan: /paper`);
   }
   if (signal.type !== 'WAIT' && signal.type !== 'HOLD' && now - lastAlertAt >= cooldownMs) {
     lastAlertAt = now;
@@ -123,8 +132,7 @@ function connectMarketSocket() {
   ws = new WebSocket('wss://ws3.indodax.com/ws/');
   ws.on('open', () => {
     console.log('Indodax market WebSocket connected');
-    ws.send(JSON.stringify({ params: { token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE5NDY2MTg0MTV9.UR1lBM6Eqh0yWz-PVirw1uPCxe60FdchR8eNVdsskeo' }, id: 1 }));
-    ws.send(JSON.stringify({ method: 1, params: { channel: 'market:trade-activity-btcidr' }, id: 2 }));
+    ws.send(JSON.stringify({ params: { channel: 'market:trade-activity-btcidr' }, id: 1 }));
   });
   ws.on('message', raw => {
     lastWsMessageAt = new Date().toISOString();
