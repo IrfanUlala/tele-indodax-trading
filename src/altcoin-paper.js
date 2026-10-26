@@ -132,6 +132,6 @@ export function formatAltcoinPaperReport(report) {
     const pnl = position.unrealizedPnl === null ? 'harga belum tersedia' : `${position.unrealizedPnl >= 0 ? '+' : '-'}${money(Math.abs(position.unrealizedPnl))}`;
     lines.push(`• ${position.symbol.toUpperCase()}/IDR — entry ${money(position.entryPrice)}, puncak ${money(position.peakPrice)}, nilai ${position.markValue === null ? '—' : money(position.markValue)}, P/L ${pnl}`);
   }
-  lines.push(`Transaksi tertutup: ${report.closedTrades}`, `Rasio untung: ${report.winRate === null ? 'belum ada hasil' : `${(report.winRate * 100).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%`}`, 'Aturan: beli setelah momentum ≥0.5%/15 menit + 3 sampel naik. Target +1%; sebelum itu stop rugi 1% dari entry. Setelah target, tahan selama outlook naik; jual saat netral/turun atau trailing stop 1% dari puncak. Jeda 15 menit setelah jual.', 'Simulasi saja—tidak memakai saldo atau order Indodax.');
+  lines.push(`Transaksi tertutup: ${report.closedTrades}`, `Rasio untung: ${report.winRate === null ? 'belum ada hasil' : `${(report.winRate * 100).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%`}`, 'Aturan: beli setelah momentum ≥0.5%/15 menit + 3 sampel naik BERUNTUN. Target +1%; jika belum target dan outlook turun → jual. Setelah target tercapai, tahan jika outlook naik; jual saat netral/turun atau trailing stop 1% dari puncak. Stop rugi 1% jika outlook ≠ naik. Jeda 15 menit setelah jual per symbol.', 'Simulasi saja—tidak memakai saldo atau order Indodax.');
   return lines.join('\n');
 }
