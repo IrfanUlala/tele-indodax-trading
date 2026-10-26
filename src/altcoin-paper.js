@@ -46,13 +46,13 @@ export class AltcoinPaperTracker {
         return { action: 'SELL', trade };
       }
       this.persist();
-      return { action: null, reason: targetReached ? 'Target 3% tercapai; posisi ditahan karena outlook masih naik, dengan trailing stop 1%.' : 'Posisi dipantau; target profit 3% atau stop rugi 1% belum tercapai.' };
+      return { action: null, reason: targetReached ? 'Target 1% tercapai; posisi ditahan karena outlook masih naik, dengan trailing stop 1%.' : 'Posisi dipantau; target profit 1% atau stop rugi 1% belum tercapai.' };
     }
     if (!(Number.isFinite(changePct) && changePct >= 1) || trendConfirmed !== true || at < (this.state.cooldownUntil[symbol] ?? 0) || !(this.state.cash > 0)) return { action: null, reason: 'Momentum atau konfirmasi tren belum cukup, masih cooldown, atau kas simulasi habis.' };
     const spent = Math.floor(this.state.cash * this.fraction);
     const quantity = spent / price;
     if (!(spent > 0 && quantity > 0)) return { action: null, reason: 'Saldo virtual tidak mencukupi.' };
-    const trade = { action: 'BUY', symbol, at: new Date(at).toISOString(), price, idr: spent, quantity, signal: 'MOMENTUM_UP', changePct };
+    const trade = { action: 'BUY', symbol, at: new Date(at).toISOString(), price, idr: spent, quantity, signal: 'MOMENTUM_UP', changePct, outlook };
     this.state.cash -= spent;
     this.state.positions[symbol] = { symbol, entryPrice: price, peakPrice: price, quantity, spent, openedAt: trade.at };
     this.state.ledger.push(trade);
@@ -70,7 +70,7 @@ export class AltcoinPaperTracker {
     const equity = this.state.cash + markedValue;
     const closed = this.state.ledger.filter(item => item.action === 'SELL');
     const wins = closed.filter(item => item.realizedPnl > 0).length;
-    return { startingCash: this.startingCash, cash: this.state.cash, positions, equity, pnl: equity - this.startingCash, closedTrades: closed.length, wins, winRate: closed.length ? wins / closed.length * 100 : null, ledger: this.state.ledger };
+    return { startingCash: this.startingCash, cash: this.state.cash, positions, equity, pnl: equity - this.startingCash, closedTrades: closed.length, profitTrades: wins, winRate: closed.length ? wins / closed.length : null, ledger: this.state.ledger };
   }
 }
 
@@ -91,39 +91,47 @@ export function loadAltcoinPaperTracker({ file, startingCash = 31000, fraction =
   return new AltcoinPaperTracker({ startingCash, fraction, stopDropPct, state, save });
 }
 
-export function formatAltcoinPaperTrade(trade) {
+export function formatAltcoinPaperTrade(trade, report = null) {
   const price = Number(trade.price).toLocaleString('id-ID', { maximumSignificantDigits: 12 });
   const money = value => `Rp${Math.floor(value).toLocaleString('id-ID')}`;
-  if (trade.action === 'BUY') return [
-    `🧪 *PAPER BELI — ${trade.symbol.toUpperCase()}/IDR*`,
-    '',
-    `Harga: *Rp${price}*`,
-    `Modal simulasi: ${money(trade.idr)}`,
-    `Momentum 15 menit: +${trade.changePct.toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`,
-    '',
-    'Simulasi saja — tidak ada order nyata.',
-    'Laporan lengkap: /paper',
-  ].join('\n');
+  
+  if (trade.action === 'BUY') {
+    const winRate = report?.profitTrades ?? 0;
+    const closedTrades = report?.closedTrades ?? 0;
+    const winRateText = closedTrades > 0 ? `${((winRate / closedTrades) * 100).toFixed(0)}% (${winRate}/${closedTrades})` : 'N/A (belum ada trade)';
+    
+    return [
+      `🟢 BELI ${trade.symbol.toUpperCase()}/IDR`,
+      `├─ Win rate: ${winRateText}`,
+      `├─ Signal: +${trade.changePct.toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`,
+      `├─ Samples: 3 beruntun naik (confirmed)`,
+      `├─ Outlook: ${trade.outlook ?? 'CENDERUNG NAIK'}`,
+      `├─ Entry: ${money(trade.idr)}`,
+      `├─ Harga: Rp${price}`,
+      `└─ Target: +1%, Stop: -1%`,
+      '',
+      'Simulasi saja — cek /paper untuk laporan lengkap',
+    ].join('\n');
+  }
+  
   return [
-    `🧪 *PAPER JUAL — ${trade.symbol.toUpperCase()}/IDR*`,
+    `🟢 JUAL ${trade.symbol.toUpperCase()}/IDR`,
+    `├─ Harga jual: Rp${price}`,
+    `├─ Hasil vs entry: ${(trade.profitPct ?? 0) >= 0 ? '+' : ''}${(trade.profitPct ?? 0).toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`,
+    `├─ Pemicu: ${{ ENTRY_STOP: 'turun 1% dari entry', TRAILING_STOP: 'turun 1% dari puncak', OUTLOOK_NEUTRAL: 'outlook menjadi netral', OUTLOOK_TURNED_DOWN: 'outlook berbalik turun' }[trade.signal] ?? trade.signal}`,
+    `└─ P/L simulasi: ${trade.realizedPnl >= 0 ? '+' : '-'}${money(Math.abs(trade.realizedPnl))}`,
     '',
-    `Harga jual: *Rp${price}*`,
-    `Hasil vs entry: ${(trade.profitPct ?? 0) >= 0 ? '+' : ''}${(trade.profitPct ?? 0).toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`,
-    `Pemicu jual: ${{ ENTRY_STOP: 'turun 1% dari entry', TRAILING_STOP: 'turun 1% dari puncak', OUTLOOK_NEUTRAL: 'outlook menjadi netral', OUTLOOK_TURNED_DOWN: 'outlook berbalik turun' }[trade.signal] ?? trade.signal}`,
-    `P/L simulasi: ${trade.realizedPnl >= 0 ? '+' : '-'}${money(Math.abs(trade.realizedPnl))}`,
-    '',
-    'Simulasi saja — tidak ada order nyata.',
-    'Laporan lengkap: /paper',
+    'Simulasi saja — cek /paper untuk laporan lengkap',
   ].join('\n');
 }
 
 export function formatAltcoinPaperReport(report) {
   const money = value => `Rp${Math.floor(value).toLocaleString('id-ID')}`;
-  const lines = ['🧪 *PAPER TRADING ALTCOIN — SIMULASI TERPISAH*', `Modal awal: ${money(report.startingCash)}`, `Kas virtual: ${money(report.cash)}`, `Ekuitas simulasi: ${money(report.equity)}`, `Untung/rugi simulasi: ${report.pnl >= 0 ? '+' : '-'}${money(Math.abs(report.pnl))}`, `Posisi terbuka: ${report.positions.length}`];
+  const lines = ['🧪 PAPER TRADING ALTCOIN — SIMULASI TERPISAH', `Modal awal: ${money(report.startingCash)}`, `Kas virtual: ${money(report.cash)}`, `Ekuitas simulasi: ${money(report.equity)}`, `Untung/rugi simulasi: ${report.pnl >= 0 ? '+' : '-'}${money(Math.abs(report.pnl))}`, `Posisi terbuka: ${report.positions.length}`];
   for (const position of report.positions) {
     const pnl = position.unrealizedPnl === null ? 'harga belum tersedia' : `${position.unrealizedPnl >= 0 ? '+' : '-'}${money(Math.abs(position.unrealizedPnl))}`;
-    lines.push(`• *${position.symbol.toUpperCase()}/IDR* — entry ${money(position.entryPrice)}, puncak ${money(position.peakPrice)}, nilai ${position.markValue === null ? '—' : money(position.markValue)}, P/L ${pnl}`);
+    lines.push(`• ${position.symbol.toUpperCase()}/IDR — entry ${money(position.entryPrice)}, puncak ${money(position.peakPrice)}, nilai ${position.markValue === null ? '—' : money(position.markValue)}, P/L ${pnl}`);
   }
-  lines.push(`Transaksi tertutup: ${report.closedTrades}`, `Rasio untung: ${report.winRate === null ? 'belum ada hasil' : `${report.winRate.toLocaleString('id-ID', { maximumFractionDigits: 1 })}%`}`, 'Aturan: beli setelah momentum ≥1%/15 menit + 3 sampel naik. Target awal +3%; sebelum itu stop rugi 1% dari entry. Setelah target, tahan selama outlook naik; jual saat netral/turun atau trailing stop 1% dari puncak. Jeda 15 menit setelah jual.', 'Simulasi saja—tidak memakai saldo atau order Indodax.');
+  lines.push(`Transaksi tertutup: ${report.closedTrades}`, `Rasio untung: ${report.winRate === null ? 'belum ada hasil' : `${(report.winRate * 100).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%`}`, 'Aturan: beli setelah momentum ≥0.5%/15 menit + 3 sampel naik. Target +1%; sebelum itu stop rugi 1% dari entry. Setelah target, tahan selama outlook naik; jual saat netral/turun atau trailing stop 1% dari puncak. Jeda 15 menit setelah jual.', 'Simulasi saja—tidak memakai saldo atau order Indodax.');
   return lines.join('\n');
 }

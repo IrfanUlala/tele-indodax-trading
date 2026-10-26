@@ -128,11 +128,23 @@ function processPrice(price, source) {
   const paperResult = paperTracker.onSignal(signal, price, now, outlook.direction);
   if (paperResult.action) {
     const trade = paperResult.trade;
-    void sendTelegram(`🧪 PAPER ${trade.action === 'BUY' ? 'BELI' : 'JUAL'} SIMULASI BTC/IDR
-Harga: Rp${price.toLocaleString('id-ID')}
-${trade.action === 'BUY' ? `Jumlah: ${trade.btc.toLocaleString('id-ID', { maximumFractionDigits: 8 })} BTC (Rp${trade.idr.toLocaleString('id-ID')})` : `Hasil simulasi terealisasi: ${trade.realizedPnl >= 0 ? '+' : '-'}Rp${Math.abs(trade.realizedPnl).toLocaleString('id-ID')}`}
-Sinyal: ${signal.type} (${signal.changePct.toFixed(2)}%)
-Tidak ada order nyata. Laporan: /paper`);
+    const report = paperTracker.report(price);
+    const winRate = report.winRate ?? 0;
+    const winRateText = report.closedTrades > 0 ? `${(winRate * 100).toFixed(0)}% (${report.profitTrades}/${report.closedTrades})` : 'N/A (belum ada trade)';
+    const sampleCount = windowHistory.length;
+    const entryAmount = trade.action === 'BUY' ? `Rp${trade.idr.toLocaleString('id-ID')}` : `Rp${Math.abs(trade.realizedPnl).toLocaleString('id-ID')}`;
+    
+    const msg = `🟢 ${trade.action === 'BUY' ? 'BELI' : 'JUAL'} BTC/IDR
+├─ Win rate: ${winRateText}
+├─ Signal: ${signal.changePct.toFixed(2)}% (${signal.type})
+├─ Samples: ${sampleCount} beruntun ${signal.type === 'WATCH_BUY' ? 'naik' : 'turun'}
+├─ Outlook: ${outlook.direction} (${outlook.changePct?.toFixed(2) ?? 'N/A'}%)
+├─ Entry: ${entryAmount}
+├─ Harga: Rp${price.toLocaleString('id-ID')}
+└─ Target: +1%, Stop: -1%
+
+Simulasi saja — cek /paper untuk laporan lengkap`;
+    void sendTelegram(msg);
   }
   if (signal.type !== 'WAIT' && signal.type !== 'HOLD' && now - lastAlertAt >= cooldownMs) {
     lastAlertAt = now;
@@ -216,7 +228,8 @@ async function pollAltcoins() {
       const result = altcoinPaperTracker.update({ symbol: item.symbol, price, changePct, trendConfirmed, outlook, at: now });
       lastAltcoinPaperPrices.set(item.symbol, price);
       if (result.action) {
-        void sendTelegram(formatAltcoinPaperTrade(result.trade), undefined, { parse_mode: 'Markdown' });
+        const altcoinReport = altcoinPaperTracker.report(lastAltcoinPaperPrices);
+        void sendTelegram(formatAltcoinPaperTrade(result.trade, altcoinReport));
       }
     }
     altcoinLastScanAt = new Date(now).toISOString();
