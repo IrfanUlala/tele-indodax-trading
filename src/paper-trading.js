@@ -74,7 +74,14 @@ export function loadPaperTracker({ file, startingCash = 31000, fraction = 0.25, 
   try { state = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const save = next => {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(next, null, 2), { mode: 0o600 });
+    const tmp = `${file}.tmp.${Date.now()}`;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(next, null, 2));
+      fs.renameSync(tmp, file);
+    } catch (error) {
+      try { fs.unlinkSync(tmp); } catch {}
+      throw error;
+    }
   };
   return new PaperTracker({ startingCash, fraction, state, save, feeRate });
 }

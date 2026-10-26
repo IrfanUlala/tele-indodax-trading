@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PaperTracker } from '../src/paper-trading.js';
+import fs from 'node:fs';
+import { PaperTracker, loadPaperTracker } from '../src/paper-trading.js';
 import { rankIdrPairs, risingCandidates, scanTopPairs, formatAltcoinReport, formatAltcoinAlert } from '../src/altcoin-scanner.js';
 
 test('formats altcoin alert with a qualified 15-minute directional outlook', () => {
@@ -103,4 +104,23 @@ test('labels falling recent market as tendency only', () => {
 test('labels small movement neutral', () => {
   const t = Date.now();
   assert.equal(marketOutlook([{ price: 100, at: t - 10000 }, { price: 100.05, at: t - 5000 }, { price: 100.1, at: t }]).direction, 'NETRAL / SIDEWAYS');
+});
+
+test('paper tracker persists state atomically via temp file + rename', async () => {
+  const os = await import('node:os');
+  const tempDir = os.default.tmpdir();
+  const file = `${tempDir}/paper-tracker-test-${Date.now()}.json`;
+  try {
+    const tracker1 = loadPaperTracker({ file, startingCash: 50000, fraction: 0.25 });
+    tracker1.onSignal({ type: 'WATCH_BUY' }, 1000000000, 1000, 'CENDERUNG NAIK');
+    const state1 = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.equal(state1.ledger.length, 1);
+    assert.ok(!fs.existsSync(`${file}.tmp*`), 'No temp files left on disk');
+    const tracker2 = loadPaperTracker({ file, startingCash: 50000, fraction: 0.25 });
+    assert.equal(tracker2.state.ledger.length, 1);
+    assert.ok(tracker2.state.position !== null);
+  } finally {
+    try { fs.unlinkSync(file); } catch {}
+    try { fs.readdirSync(tempDir).filter(f => f.startsWith(`paper-tracker-test-`)).forEach(f => { try { fs.unlinkSync(`${tempDir}/${f}`); } catch {} }); } catch {}
+  }
 });
