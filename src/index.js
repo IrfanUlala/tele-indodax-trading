@@ -130,7 +130,12 @@ Tidak ada order nyata. Laporan: /paper`);
 
 let wsConnectRetries = 0;
 let wsPingTimer = null;
+let wsDisabled = true; // Indodax WS returning 3003 (Go Away); use REST fallback
 function connectMarketSocket() {
+  if (wsDisabled) {
+    console.log('WebSocket disabled; using REST polling fallback');
+    return;
+  }
   if (ws) { try { ws.terminate(); } catch {} }
   if (wsPingTimer) clearInterval(wsPingTimer);
   ws = new WebSocket('wss://ws3.indodax.com/ws/');
@@ -138,7 +143,7 @@ function connectMarketSocket() {
   ws.on('open', () => {
     console.log('Indodax market WebSocket connected');
     wsConnectRetries = 0;
-    ws.send(JSON.stringify({ params: { channel: 'market:trade-activity-btcidr' }, id: 1 }));
+    ws.send(JSON.stringify({ method: 'subscribe', params: ['market:trade-activity-btcidr'] }));
     wsPingTimer = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.ping(); }, 30_000);
   });
   ws.on('message', raw => {
