@@ -131,189 +131,35 @@ Tidak ada order nyata. Laporan: /paper`);
 
 let wsConnectRetries = 0;
 let wsPingTimer = null;
-let wsLastOffset = null; // Track last received offset for BTC recovery
-let wsAltcoinOffsets = new Map(); // Track offsets per altcoin channel
-let wsMessageId = 1; // Message ID counter for Indodax WS protocol
-let wsTopAltcoins = []; // Current top 10 altcoins for subscription
-
-async function fetchTopAltcoins() {
-  try {
-    const response = await fetch('https://indodax.com/api/tickers', { signal: AbortSignal.timeout(8000) });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const payload = await response.json();
-    wsTopAltcoins = rankIdrPairs(payload, 10);
-    console.log('Fetched top 10 altcoins:', wsTopAltcoins.map(p => p.symbol).join(', '));
-  } catch (error) {
-    console.error('Failed to fetch top altcoins:', error.message);
-    wsTopAltcoins = [];
-  }
-}
-
-function subscribeAltcoins() {
-  if (!ws || ws.readyState !== WebSocket.OPEN || wsTopAltcoins.length === 0) return;
-  for (const pair of wsTopAltcoins) {
-    const channel = `market:trade-activity-${pair.pair}`;
-    const subscribePayload = {
-      method: 1,
-      params: {
-        channel,
-        ...(wsAltcoinOffsets.has(pair.symbol) && { recover: true, offset: wsAltcoinOffsets.get(pair.symbol) })
-      },
-      id: wsMessageId++
-    };
-    ws.send(JSON.stringify(subscribePayload));
-    console.log(`Subscribing to ${channel}`);
-  }
-}
-
+let wsDisabled = true; // Indodax WS returning 3003 (Go Away); use REST fallback
 function connectMarketSocket() {
-  if (ws) { try { ws.terminate(); } catch { } }
+  if (wsDisabled) {
+    console.log('WebSocket disabled; using REST polling fallback');
+    return;
+  }
+  if (ws) { try { ws.terminate(); } catch {} }
   if (wsPingTimer) clearInterval(wsPingTimer);
   ws = new WebSocket('wss://ws3.indodax.com/ws/');
-  let authAcked = false;
-  let btcSubscribed = false;
-  let altcoinSubscribed = 0; // Count of subscribed altcoins
-  
+  let subscribed = false;
   ws.on('open', () => {
     console.log('Indodax market WebSocket connected');
     wsConnectRetries = 0;
-    
-    // Step 1: Authenticate with static token (Marketdata-websocket.md)
-    const staticToken = 'eyJhbG...skeo'; // Placeholder; use public static token from docs
-    const authPayload = {
-      params: { token: staticToken },
-      id: wsMessageId++
-    };
-    ws.send(JSON.stringify(authPayload));
-    console.log('Sent auth message, awaiting response...');
+    ws.send(JSON.stringify({ method: 'subscribe', params: ['market:trade-activity-btcidr'] }));
+    wsPingTimer = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.ping(); }, 30_000);
   });
-  
   ws.on('message', raw => {
     lastWsMessageAt = new Date().toISOString();
     try {
       const msg = JSON.parse(raw.toString());
-      
-      // Handle auth response
-      if (!authAcked && msg.result?.client) {
-        authAcked = true;
-        console.log('Auth acknowledged, subscribing to BTC and altcoins');
-        
-        // Step 2a: Subscribe to BTC channel (method=1 per Marketdata-websocket.md)
-        const btcSubscribePayload = {
-          method: 1,
-          params: {
-            channel: 'market:trade-activity-btcidr',
-            ...(wsLastOffset && { recover: true, offset: wsLastOffset })
-          },
-          id: wsMessageId++
-        };
-        ws.send(JSON.stringify(btcSubscribePayload));
-        
-        // Step 2b: Subscribe to altcoins
-        subscribeAltcoins();
-        return;
-      }
-      
-      // Handle BTC subscription response
-      if (!btcSubscribed && msg.result?.channel === 'market:trade-activity-btcidr') {
-        btcSubscribed = true;
-        console.log('Subscribed to market:trade-activity-btcidr', { offset: msg.result?.offset });
-        
-        // Step 3: Start ping only after BTC subscribed (method=7 per Marketdata-websocket.md)
-        if (altcoinSubscribed >= wsTopAltcoins.length) {
-          wsPingTimer = setInterval(() => {
-            if (ws?.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ method: 7, id: wsMessageId++ }));
-            }
-          }, 30_000);
-        }
-        return;
-      }
-      
-      // Handle altcoin subscription responses
-      if (btcSubscribed && msg.result?.channel?.startsWith('market:trade-activity-')) {
-        const channelMatch = msg.result.channel.match(/market:trade-activity-(.+)$/);
-        if (channelMatch && channelMatch[1] !== 'btcidr') {
-          const symbol = channelMatch[1].replace('idr', '').toLowerCase();
-          altcoinSubscribed++;
-          console.log(`Subscribed to ${msg.result.channel}`, { offset: msg.result?.offset, altcoinCount: altcoinSubscribed });
-          
-          // Start ping after all subscriptions done
-          if (altcoinSubscribed >= wsTopAltcoins.length && !wsPingTimer) {
-            wsPingTimer = setInterval(() => {
-              if (ws?.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ method: 7, id: wsMessageId++ }));
-              }
-            }, 30_000);
-          }
-          return;
-        }
-      }
-      
-      // Handle BTC trade data
-      if (msg.result?.channel === 'market:trade-activity-btcidr') {
-        if (msg.result?.data?.offset !== undefined) wsLastOffset = msg.result.data.offset;
-        const trades = msg?.result?.data?.data;
-        if (Array.isArray(trades)) {
-          for (const trade of trades) {
-            if (String(trade[0]).trim().toLowerCase() === 'btcidr') {
-              processPrice(Number(trade[4]), 'websocket');
-            }
-          }
-        }
-        return;
-      }
-      
-      // Handle altcoin trade data
-      if (msg.result?.channel?.startsWith('market:trade-activity-')) {
-        const channelMatch = msg.result.channel.match(/market:trade-activity-(.+)$/);
-        if (channelMatch && channelMatch[1] !== 'btcidr') {
-          const pair = channelMatch[1];
-          const symbol = pair.replace('idr', '').toLowerCase();
-          
-          if (msg.result?.data?.offset !== undefined) {
-            wsAltcoinOffsets.set(symbol, msg.result.data.offset);
-          }
-          
-          const trades = msg?.result?.data?.data;
-          if (Array.isArray(trades)) {
-            const now = Date.now();
-            for (const trade of trades) {
-              const tradePair = String(trade[0]).trim().toLowerCase();
-              if (tradePair === pair) {
-                const price = Number(trade[4]);
-                if (price > 0 && Number.isFinite(price)) {
-                  const points = altcoinHistories.get(symbol) ?? [];
-                  points.push({ price, at: now });
-                  while (points.length > 0 && now - points[0].at > 20 * 60_000) points.shift();
-                  altcoinHistories.set(symbol, points);
-                }
-              }
-            }
-          }
-        }
-        return;
-      }
-      
-      // Handle pong response (method=7 response has just id)
-      if (msg.id !== undefined && (btcSubscribed || altcoinSubscribed > 0)) {
-        // Ping/pong ack, no action needed
-        return;
-      }
-      
-      console.log('Unhandled WS message:', { id: msg.id, channel: msg.result?.channel, hasError: !!msg.error });
-    } catch (error) {
-      console.error('Invalid market WS message:', error.message);
-    }
+      if (msg.result?.channel === 'market:trade-activity-btcidr') subscribed = true;
+      const trades = msg?.result?.data?.data;
+      if (Array.isArray(trades)) for (const trade of trades) if (String(trade[0]).trim().toLowerCase() === 'btcidr') processPrice(Number(trade[4]), 'websocket');
+    } catch (error) { console.error('Invalid market WS message:', error.message); }
   });
-  
-  ws.on('error', error => {
-    console.error('Market WS error:', error.message, { authAcked, btcSubscribed, altcoinCount: altcoinSubscribed });
-  });
-  
+  ws.on('error', error => console.error('Market WS error:', error.message, { subscribed, code: error.code }));
   ws.on('close', code => {
     if (wsPingTimer) clearInterval(wsPingTimer);
-    console.log('Market WS closed', { code, btcSubscribed, altcoinCount: altcoinSubscribed, retries: wsConnectRetries });
+    console.log('Market WS closed', { code, subscribed, retries: wsConnectRetries });
     const delay = Math.min(1000 * Math.pow(2, wsConnectRetries), 30000);
     wsConnectRetries++;
     wsRetry = setTimeout(connectMarketSocket, delay);
@@ -473,7 +319,7 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
   bot.command('selesai', async ctx => {
     if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
     position = null; pendingSell = false;
-    try { fs.unlinkSync(dataFile); } catch { }
+    try { fs.unlinkSync(dataFile); } catch {}
     await ctx.reply('Pencatatan posisi ditutup. Gunakan /beli <harga_IDR> setelah pembelian manual berikutnya.');
   });
   bot.command('status', async ctx => {
@@ -565,10 +411,8 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
 }
 
 connectMarketSocket();
-await fetchTopAltcoins(); // Fetch initial top altcoins before WS connects
 void pollTicker();
 const pollTimer = setInterval(() => void pollTicker(), intervalMs);
-const altcoinRefreshTimer = setInterval(() => void fetchTopAltcoins(), 60 * 60_000); // Refresh every hour
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
-  clearInterval(pollTimer); clearInterval(altcoinRefreshTimer); clearTimeout(wsRetry); ws?.close(); bot?.stop(); process.exit(0);
+  clearInterval(pollTimer); clearTimeout(wsRetry); ws?.close(); bot?.stop(); process.exit(0);
 });
