@@ -18,6 +18,17 @@ import { fileURLToPath } from 'node:url';
 
 const dataDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data');
 const logDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'logs');
+const priceHistoryFile = path.join(logDir, 'price-history.jsonl');
+
+function recordPriceHistory(symbol, price, source, at = Date.now()) {
+  if (!Number.isFinite(price) || price <= 0) return;
+  const entry = { symbol, price, source, at, timestamp: new Date(at).toISOString() };
+  try {
+    fs.appendFileSync(priceHistoryFile, JSON.stringify(entry) + '\n');
+  } catch (error) {
+    console.error('Price history record failed:', error.message);
+  }
+}
 const orderControl = new OrderControl({ file: path.join(dataDir, 'order-control.json'), auditFile: path.join(logDir, 'orders.jsonl') });
 const liveConfig = validateLiveConfig(process.env);
 const btcTicker = async () => {
@@ -106,6 +117,7 @@ async function sendTelegram(text, keyboard, extra = {}) {
 function processPrice(price, source) {
   if (!Number.isFinite(price) || price <= 0) return;
   watchPosition(price);
+  recordPriceHistory('BTC/IDR', price, source);
   const now = Date.now();
   latest = { pair: 'BTC/IDR', price, source, observedAt: new Date(now).toISOString() };
   history.push({ price, at: now });
@@ -188,6 +200,7 @@ async function pollAltcoins() {
       if (!(price > 0 && Number.isFinite(price))) continue;
       const points = altcoinHistories.get(pair.symbol) ?? [];
       points.push({ price, at: now });
+      recordPriceHistory(pair.symbol, price, 'rest-polling');
       while (points.length > 0 && now - points[0].at > 20 * 60_000) points.shift();
       altcoinHistories.set(pair.symbol, points);
     }
