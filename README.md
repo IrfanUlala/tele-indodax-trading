@@ -2,7 +2,7 @@
 
 Node.js + Telegram bot untuk monitoring pasar BTC/IDR Indodax, paper trading otomatis altcoin, dan jalur order manual BTC (live, require explicit enable). WebSocket dengan REST fallback, semua data lokal.
 
-**Paper trading:** Simulasi BTC/IDR entry +1% 15-menit naik, target +3%, hold saat outlook naik, jual saat netral/turun atau trailing 1%. Simulasi altcoin top-10 IDR volume, entry momentum +1%, target +3%, stop loss 1% sebelum target, trailing 1% setelah target.
+**Paper trading:** Simulasi BTC/IDR entry +1% 15-menit naik, target +1%, hold saat outlook naik, jual saat netral/turun atau trailing 1%. Simulasi altcoin top-10 IDR volume, entry momentum +1%, target +1%, stop loss 1% sebelum target, trailing 1% setelah target.
 
 **Live trading:** Manual `/buy` dan `/sell` BTC/IDR saja, konfirmasi 2x, MARKET order. Require `LIVE_TRADING_ENABLED=true`, `MAX_ORDER_IDR` > 0, `MAX_PRICE_DEVIATION_PCT` > 0. Default mati. Audit log di `logs/orders.jsonl`.
 

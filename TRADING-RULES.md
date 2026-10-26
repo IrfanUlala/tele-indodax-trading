@@ -29,16 +29,16 @@ General risk guidance, bukan saran keuangan personal. Crypto volatile; kerugian 
 - **Signal:** 15-min rolling, jika latest ≥ oldest + 1% (`SIGNAL_THRESHOLD_PCT`) naik 3x beruntun → WATCH_BUY. Turun 3x → WATCH_SELL. Cooldown 15 menit per pair.
 - **Entry:** WATCH_BUY + 3 sample beruntun naik → buy 25% cash simulasi. Record entry price, timestamp.
 - **Hold naik:** jika market outlook NAIK (3+ sample terbaru naik), tahan. Jangan jual sampai outlook ≠ NAIK.
-- **Exit 1:** outlook NETRAL/TURUN sebelum +3% → jual 100%.
-- **Exit 2:** setelah +3% target reached, hold sampai outlook NAIK. Saat NETRAL/TURUN atau trailing 1% dari peak → jual.
-- **Stop loss:** sebelum +3%, jika outlook ≠ NAIK dan loss 1% dari entry → jual.
+- **Exit 1:** outlook NETRAL/TURUN sebelum +1% → jual 100%.
+- **Exit 2:** setelah +1% target reached, hold sampai outlook NAIK. Saat NETRAL/TURUN atau trailing 1% dari peak → jual.
+- **Stop loss:** sebelum +1%, jika outlook ≠ NAIK dan loss 1% dari entry → jual.
 - **Cooldown:** 15 menit antarorder untuk pair yang sama.
 
 ### Altcoin IDR paper (top-10 volume)
 - **Entry:** 15-min rolling, entry ≥ 1% + 3 sample naik → buy 25% cash (jika belum hold).
 - **Hold:** sama BTC (outlook NAIK → tahan).
-- **Exit 1:** turun 1% dari entry sebelum +3% + outlook ≠ NAIK → jual.
-- **Exit 2:** +3% target reached, hold sampai NETRAL/TURUN atau trailing 1% dari peak.
+- **Exit 1:** turun 1% dari entry sebelum +1% + outlook ≠ NAIK → jual.
+- **Exit 2:** +1% target reached, hold sampai NETRAL/TURUN atau trailing 1% dari peak.
 - **Stop:** 1% loss sebelum target, jika outlook ≠ NAIK.
 - **Cooldown:** 15 menit per pair.
 

@@ -24,7 +24,7 @@ export class AltcoinPaperTracker {
     if (position) {
       position.peakPrice = Math.max(position.peakPrice, price);
       const profitPct = ((price - position.entryPrice) / position.entryPrice) * 100;
-      const targetReached = position.targetReached || profitPct >= 3;
+      const targetReached = position.targetReached || profitPct >= 1;
       position.targetReached = targetReached;
       const drawdownPct = ((price - position.peakPrice) / position.peakPrice) * 100;
       const stopTriggered = targetReached ? drawdownPct <= -this.stopDropPct : profitPct <= -this.stopDropPct && outlook !== 'CENDERUNG NAIK';

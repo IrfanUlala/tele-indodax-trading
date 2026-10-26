@@ -23,7 +23,7 @@ export class PaperTracker {
     if (position) {
       position.peakPrice = Math.max(position.peakPrice ?? position.entryPrice, price);
       const profitPct = ((price - position.entryPrice) / position.entryPrice) * 100;
-      const targetReached = profitPct >= 3;
+      const targetReached = profitPct >= 1;
       const drawdownPct = ((price - position.peakPrice) / position.peakPrice) * 100;
       const stopTriggered = targetReached ? drawdownPct <= -1 : profitPct <= -1 && outlook !== 'CENDERUNG NAIK';
       const outlookExit = targetReached && outlook !== 'CENDERUNG NAIK';
