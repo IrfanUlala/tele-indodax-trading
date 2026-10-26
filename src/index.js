@@ -74,6 +74,7 @@ const port = Number(process.env.PORT || 3000);
 const threshold = Number(process.env.SIGNAL_THRESHOLD_PCT || 1);
 const cooldownMs = Number(process.env.ALERT_COOLDOWN_MINUTES || 60) * 60_000;
 const intervalMs = Math.max(10, Number(process.env.POLL_INTERVAL_SECONDS || 30)) * 1000;
+const altcoinIntervalMs = Math.max(10, Number(process.env.ALTCOIN_POLL_SECONDS || 15)) * 1000;
 const history = [];
 const altcoinHistories = new Map();
 const altcoinCandidateState = new Set();
@@ -377,7 +378,7 @@ function formatAltcoinReport() {
 }
 
 void pollAltcoins();
-const altcoinTimer = setInterval(() => void pollAltcoins(), Math.max(intervalMs, 60_000));
+const altcoinTimer = setInterval(() => void pollAltcoins(), altcoinIntervalMs);
 void altcoinTimer;
 
 if (process.env.TELEGRAM_BOT_TOKEN) {
