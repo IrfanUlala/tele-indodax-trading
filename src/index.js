@@ -269,22 +269,22 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
   });
   bot.command('rule', async ctx => {
     if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
-    const rules = `📋 **TRADING RULES — Paper Simulasi**
+    const rules = `📋 TRADING RULES — Paper Simulasi
 
-🔷 **Signal Threshold (Entry Condition)**
+🔷 Signal Threshold (Entry Condition)
 • Ambang naik: ≥ 0.5% dalam 15 menit
 • Ambang turun: ≤ -0.5% dalam 15 menit
 • Konfirmasi: 3 sample beruntun naik/turun (no bounce)
-• Env: \`SIGNAL_THRESHOLD_PCT=0.5\`
+• Env: SIGNAL_THRESHOLD_PCT=0.5
 
-🟢 **BTC/IDR Entry**
+🟢 BTC/IDR Entry
 • Saat WATCH_BUY signal (0.5% + 3 naik) + outlook NAIK
 • Beli: 25% dari saldo simulasi
 • Min order: 10,000 IDR notional
 • Fee: 0.1% deducted (entry & exit)
 • Cooldown: 15 menit sebelum entry berikutnya
 
-📈 **BTC/IDR Exit Rules**
+📈 BTC/IDR Exit Rules
 
 Exit 1 (Sebelum Target):
 • Jika: outlook NETRAL/TURUN sebelum +1%
@@ -299,36 +299,36 @@ Stop Loss:
 • Jika: loss ≤ -1% AND outlook ≠ NAIK
 • Action: Sell 100% (cut loss)
 
-🪙 **Altcoin IDR (Top-10 Volume)**
+🪙 Altcoin IDR (Top-10 Volume)
 • Entry: sama BTC (0.5% + 3 naik + NAIK outlook)
 • Beli: 25% cash per symbol
 • Cooldown: 15 menit per symbol (multiple positions OK)
 • Exit: sama BTC rules
-• Target: +1% (dari +3%)
+• Target: +1%
 • Stop loss: 1% sebelum target
 • Trailing: 1% dari peak
 
-🌡️ **Outlook Detection (Trend)**
+🌡️ Outlook Detection (Trend)
 • Window: last 15 minutes
 • Min samples: 3
 • NAIK: changePct ≥ 0.2% AND semua sample beruntun naik
 • TURUN: changePct ≤ -0.2% AND semua sample beruntun turun
 • NETRAL: mixed trend atau perubahan < 0.2%
 
-⚙️ **Konfigurasi Default**
-• BTC polling: 30 detik (\`POLL_INTERVAL_SECONDS\`)
-• Altcoin polling: 15 detik (\`ALTCOIN_POLL_SECONDS\`)
+⚙️ Konfigurasi Default
+• BTC polling: 30 detik (POLL_INTERVAL_SECONDS)
+• Altcoin polling: 15 detik (ALTCOIN_POLL_SECONDS)
 • Price history: logs/price-history.jsonl
 • Paper state: data/position.json, data/altcoin-paper.json
 • Fee: 0.1% (Indodax default)
 • Min notional: 10,000 IDR
 
-🛡️ **Safety**
+🛡️ Safety
 • Live trading: disabled by default
 • Paper trading: simulasi saja, tidak ada order nyata
 • Kill switch: persistent across restarts
 • Audit log: logs/audit.jsonl (signed, immutable)`;
-    await ctx.reply(rules, { parse_mode: 'Markdown' });
+    await ctx.reply(rules);
   });
   bot.command('paper', async ctx => {
     if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
