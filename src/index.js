@@ -128,23 +128,36 @@ Tidak ada order nyata. Laporan: /paper`);
   }
 }
 
+let wsConnectRetries = 0;
+let wsPingTimer = null;
 function connectMarketSocket() {
   if (ws) { try { ws.terminate(); } catch {} }
+  if (wsPingTimer) clearInterval(wsPingTimer);
   ws = new WebSocket('wss://ws3.indodax.com/ws/');
+  let subscribed = false;
   ws.on('open', () => {
     console.log('Indodax market WebSocket connected');
+    wsConnectRetries = 0;
     ws.send(JSON.stringify({ params: { channel: 'market:trade-activity-btcidr' }, id: 1 }));
+    wsPingTimer = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.ping(); }, 30_000);
   });
   ws.on('message', raw => {
     lastWsMessageAt = new Date().toISOString();
     try {
       const msg = JSON.parse(raw.toString());
+      if (msg.result?.channel === 'market:trade-activity-btcidr') subscribed = true;
       const trades = msg?.result?.data?.data;
       if (Array.isArray(trades)) for (const trade of trades) if (String(trade[0]).trim().toLowerCase() === 'btcidr') processPrice(Number(trade[4]), 'websocket');
     } catch (error) { console.error('Invalid market WS message:', error.message); }
   });
-  ws.on('error', error => console.error('Market WS error:', error.message));
-  ws.on('close', () => { console.log('Market WS closed; reconnecting'); wsRetry = setTimeout(connectMarketSocket, 5000); });
+  ws.on('error', error => console.error('Market WS error:', error.message, { subscribed, code: error.code }));
+  ws.on('close', code => {
+    if (wsPingTimer) clearInterval(wsPingTimer);
+    console.log('Market WS closed', { code, subscribed, retries: wsConnectRetries });
+    const delay = Math.min(1000 * Math.pow(2, wsConnectRetries), 30000);
+    wsConnectRetries++;
+    wsRetry = setTimeout(connectMarketSocket, delay);
+  });
 }
 
 async function pollTicker() {
