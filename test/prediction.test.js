@@ -64,7 +64,7 @@ import { marketOutlook } from '../src/prediction.js';
 
 test('paper tracker buys with 25 percent of virtual cash on WATCH_BUY and records ledger', () => {
   const tracker = new PaperTracker({ startingCash: 50000, fraction: 0.25 });
-  const result = tracker.onSignal({ type: 'WATCH_BUY' }, 1000000000, 1000, 'CENDERUNG NAIK');
+  const result = tracker.onSignal({ type: 'WATCH_BUY', changePct: 1.0 }, 1000000000, 1000, 'CENDERUNG NAIK');
   assert.equal(result.action, 'BUY');
   assert.ok(tracker.state.cash < 50000);
   assert.ok(tracker.state.position.btc > 0);
@@ -74,8 +74,8 @@ test('paper tracker buys with 25 percent of virtual cash on WATCH_BUY and record
 
 test('paper tracker sells virtual position on WATCH_SELL and records realized result', () => {
   const tracker = new PaperTracker({ startingCash: 50000, fraction: 0.25 });
-  tracker.onSignal({ type: 'WATCH_BUY' }, 1000000000, 1000, 'CENDERUNG NAIK');
-  const result = tracker.onSignal({ type: 'WATCH_SELL' }, 1100000000, 2000, 'CENDERUNG TURUN');
+  tracker.onSignal({ type: 'WATCH_BUY', changePct: 1.0 }, 1000000000, 1000, 'CENDERUNG NAIK');
+  const result = tracker.onSignal({ type: 'WATCH_SELL', changePct: -1.0 }, 1100000000, 2000, 'CENDERUNG TURUN');
   assert.equal(result.action, 'SELL');
   assert.equal(tracker.state.position, null);
   assert.ok(tracker.state.cash > 50000);
@@ -85,8 +85,8 @@ test('paper tracker sells virtual position on WATCH_SELL and records realized re
 
 test('does not simulate repeated buys while already holding a position', () => {
   const tracker = new PaperTracker({ startingCash: 50000, fraction: 0.25 });
-  tracker.onSignal({ type: 'WATCH_BUY' }, 1000000000, 1000, 'CENDERUNG NAIK');
-  assert.equal(tracker.onSignal({ type: 'WATCH_BUY' }, 900000000, 2000, 'CENDERUNG NAIK').action, null);
+  tracker.onSignal({ type: 'WATCH_BUY', changePct: 1.0 }, 1000000000, 1000, 'CENDERUNG NAIK');
+  assert.equal(tracker.onSignal({ type: 'WATCH_BUY', changePct: 1.0 }, 900000000, 2000, 'CENDERUNG NAIK').action, null);
   assert.equal(tracker.state.ledger.length, 1);
 });
 

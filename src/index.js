@@ -12,6 +12,7 @@ import { formatPaperReport, loadPaperTracker } from './paper-trading.js';
 import { formatAltcoinPaperReport, formatAltcoinPaperTrade, loadAltcoinPaperTracker } from './altcoin-paper.js';
 import { callbackNotice } from './callback-notice.js';
 import { rankIdrPairs, scanTopPairs, formatAltcoinReport as renderAltcoinReport, formatAltcoinAlert } from './altcoin-scanner.js';
+import { startDashboardServer, setPaperTracker, setAltcoinPaperTracker } from './dashboard/server.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,9 +94,11 @@ let latestAltcoinScan = [];
 let altcoinLastScanAt = null;
 const paperFile = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'paper-trading.json');
 const paperTracker = loadPaperTracker({ file: paperFile, startingCash: Number(process.env.PAPER_STARTING_IDR || 31000), fraction: 0.25 });
+setPaperTracker(paperTracker);
 const altcoinPaperFile = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'altcoin-paper-trading.json');
 const altcoinPaperTracker = loadAltcoinPaperTracker({ file: altcoinPaperFile, startingCash: Number(process.env.ALTCOIN_PAPER_STARTING_IDR || 31000), fraction: 0.25, stopDropPct: 1 });
 const lastAltcoinPaperPrices = new Map();
+setAltcoinPaperTracker(altcoinPaperTracker, lastAltcoinPaperPrices);
 let latest = null;
 let lastAlertAt = 0;
 let ws = null;
@@ -105,6 +108,10 @@ let lastWsMessageAt = null;
 
 app.get('/health', (_req, res) => res.json({ ok: true, pair: 'BTC/IDR', latest, websocketConnected: ws?.readyState === WebSocket.OPEN, lastWsMessageAt }));
 app.listen(port, '127.0.0.1', () => console.log(`Health endpoint on 127.0.0.1:${port}/health`));
+
+// Start dashboard server on separate port
+const dashboardPort = Number(process.env.DASHBOARD_PORT || 3001);
+void startDashboardServer(dashboardPort);
 
 async function sendTelegram(text, keyboard, extra = {}) {
   if (!bot || !process.env.TELEGRAM_CHAT_ID) return;

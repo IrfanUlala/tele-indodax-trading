@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Coint Trading Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #0d1117; --card: #161b22; --border: #30363d;
+      --text: #e6edf3; --text-muted: #8b949e; --accent: #58a6ff;
+      --green: #3fb950; --red: #f85149; --yellow: #d29922;
+      --purple: #a371f7; --orange: #f0883e;
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg); color: var(--text); line-height: 1.5; min-height: 100vh; }
+    .header { background: var(--card); border-bottom: 1px solid var(--border); padding: 16px 24px;
+      display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
+    .header h1 { font-size: 1.25rem; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+    .header .status { display: flex; align-items: center; gap: 12px; font-size: 0.875rem; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); }
+    .status-dot.connected { background: var(--green); }
+    .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+    .card h2 { font-size: 0.875rem; font-weight: 600; text-transform: uppercase; color: var(--text-muted);
+      margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+    .metric { display: flex; justify-content: space-between; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .metric:last-child { border-bottom: none; }
+    .metric-label { color: var(--text-muted); font-size: 0.875rem; }
+    .metric-value { font-weight: 600; font-size: 1.125rem; }
+    .metric-value.positive { color: var(--green); }
+    .metric-value.negative { color: var(--red); }
+    .metric-value.warning { color: var(--yellow); }
+    
+    .big-metric { text-align: center; padding: 24px 0; }
+    .big-metric .value { font-size: 3rem; font-weight: 700; line-height: 1; margin-bottom: 4px; }
+    .big-metric .label { color: var(--text-muted); font-size: 0.875rem; }
+    
+    .position-card { display: flex; flex-direction: column; gap: 12px; }
+    .position-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .position-item { background: var(--bg); padding: 12px; border-radius: 6px; border: 1px solid var(--border); }
+    .position-label { color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; }
+    .position-value { font-size: 1.125rem; font-weight: 600; margin-top: 4px; }
+    
+    .trade-table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+    .trade-table th { text-align: left; color: var(--text-muted); font-weight: 500; padding: 8px; border-bottom: 1px solid var(--border); }
+    .trade-table td { padding: 8px; border-bottom: 1px solid var(--border); }
+    .trade-table tr:hover td { background: rgba(88, 166, 255, 0.05); }
+    .trade-type.buy { color: var(--green); }
+    .trade-type.sell { color: var(--red); }
+    .pnl.positive { color: var(--green); }
+    .pnl.negative { color: var(--red); }
+    
+    .regime-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
+    .regime-trending_up { background: rgba(63, 185, 80, 0.2); color: var(--green); border: 1px solid var(--green); }
+    .regime-trending_down { background: rgba(248, 81, 73, 0.2); color: var(--red); border: 1px solid var(--red); }
+    .regime-volatile { background: rgba(210, 153, 34, 0.2); color: var(--yellow); border: 1px solid var(--yellow); }
+    .regime-ranging { background: rgba(88, 166, 255, 0.2); color: var(--accent); border: 1px solid var(--accent); }
+    .regime-unknown { background: var(--border); color: var(--text-muted); }
+    
+    .turtle-level { display: flex; align-items: center; gap: 8px; padding: 8px; background: var(--bg); border-radius: 6px; margin: 4px 0; }
+    .turtle-level.active { border: 1px solid var(--red); background: rgba(248, 81, 73, 0.1); }
+    .turtle-level.recovered { border: 1px solid var(--green); background: rgba(63, 185, 80, 0.1); }
+    .turtle-level-bar { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+    .turtle-level-fill { height: 100%; background: var(--red); transition: width 0.3s; }
+    
+    .chart-container { height: 200px; position: relative; }
+    .loading { text-align: center; color: var(--text-muted); padding: 40px; }
+    .error { color: var(--red); text-align: center; padding: 20px; }
+    
+    @media (max-width: 768px) {
+      .container { padding: 16px; }
+      .position-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <h1>📊 Coint Trading Dashboard</h1>
+    <div class="status">
+      <span id="lastUpdate">Memuat...</span>
+      <span class="status-dot" id="connectionStatus"></span>
+      <span id="connectionText">Menghubungkan...</span>
+    </div>
+  </header>
+  
+  <div class="container">
+    <!-- Top Metrics Row -->
+    <div class="grid">
+      <div class="card">
+        <h2>💰 Portfolio Overview</h2>
+        <div class="big-metric">
+          <div class="value" id="totalEquity">-</div>
+          <div class="label">Total Equity (IDR)</div>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Cash</span>
+          <span class="metric-value" id="cash">-</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Position Value</span>
+          <span class="metric-value" id="positionValue">-</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Unrealized PnL</span>
+          <span class="metric-value" id="unrealizedPnl">-</span>
+        </div>
+      </div>
+      
+      <div class="card">
+        <h2>📈 Performance</h2>
+        <div class="big-metric">
+          <div class="value" id="totalPnl">-</div>
+          <div class="label">Total PnL</div>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Win Rate</span>
+          <span class="metric-value" id="winRate">-</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Total Trades</span>
+          <span class="metric-value" id="totalTrades">-</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">ROE</span>
+          <span class="metric-value" id="roe">-</span>
+        </div>
+      </div>
+      
+      <div class="card">
+        <h2>🛡️ Risk Metrics</h2>
+        <div class="big-metric">
+          <div class="value" id="maxDrawdown">-</div>
+          <div class="label">Max Drawdown</div>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Current Drawdown</span>
+          <span class="metric-value" id="currentDrawdown">-</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Sharpe Ratio</span>
+          <span class="metric-value" id="sharpe">-</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Sortino Ratio</span>
+          <span class="metric-value" id="sortino">-</span>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Second Row: Position, Regime, Turtle -->
+    <div class="grid">
+      <div class="card">
+        <h2>📍 Current Position</h2>
+        <div class="position-card" id="positionInfo">
+          <div class="loading">Tidak ada posisi aktif</div>
+        </div>
+      </div>
+      
+      <div class="card">
+        <h2>🧠 Market Regime</h2>
+        <div class="position-card" id="regimeInfo">
+          <div class="loading">Memuat regime...</div>
+        </div>
+      </div>
+      
+      <div class="card">
+        <h2>🐢 Turtle Protection</h2>
+        <div class="position-card" id="turtleInfo">
+          <div class="loading">Memuat status...</div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Third Row: Risk Details, Recent Trades, Altcoin -->
+    <div class="grid">
+    <div class="card" style="grid-column: span 2;">
+      <h2>⚠️ Risk Details</h2>
+      <div class="position-row" id="riskDetails">
+        <div class="loading">Memuat detail risiko...</div>
+      </div>
+    </div>
+      
+    <div class="card">
+      <h2>📋 Recent Trades</h2>
+      <div id="tradesTable">
+        <table class="trade-table">
+          <thead>
+            <tr>
+              <th>Waktu</th>
+              <th>Type</th>
+              <th>Price</th>
+              <th>Qty (BTC)</th>
+              <th>PnL</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="tradesBody">
+            <tr><td colspan="6" class="loading">Memuat riwayat...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+      
+    <div class="card" style="grid-column: span 1;">
+      <h2>₪ ALTCOIN — PAPER SIMULASI</h2>
+      <div id="altcoinCard">
+        <div class="loading">Loading altcoin data...</div>
+      </div>
+    </div>
+    </div>
+  </div>
+  
+  <script>
+    // Dashboard JavaScript
+    const API_BASE = '/api';
+    let updateInterval = null;
+    let currentPrice = null;
+    
+    // Formatters
+    const fmtIdr = (n) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(n);
+    const fmtBtc = (n) => n.toFixed(8);
+    const fmtPct = (n) => (n * 100).toFixed(2) + '%';
+    const fmtNum = (n) => n.toFixed(4);
+    const timeAgo = (ts) => {
+      const diff = Date.now() - ts;
+      if (diff < 60000) return Math.floor(diff/1000) + 's lalu';
+      if (diff < 3600000) return Math.floor(diff/60000) + 'm lalu';
+      if (diff < 86400000) return Math.floor(diff/3600000) + 'j lalu';
+      return new Date(ts).toLocaleDateString('id-ID');
+    };
+    
+    // DOM Elements
+    const els = {
+      totalEquity: document.getElementById('totalEquity'),
+      cash: document.getElementById('cash'),
+      positionValue: document.getElementById('positionValue'),
+      unrealizedPnl: document.getElementById('unrealizedPnl'),
+      totalPnl: document.getElementById('totalPnl'),
+      winRate: document.getElementById('winRate'),
+      totalTrades: document.getElementById('totalTrades'),
+      roe: document.getElementById('roe'),
+      maxDrawdown: document.getElementById('maxDrawdown'),
+      currentDrawdown: document.getElementById('currentDrawdown'),
+      sharpe: document.getElementById('sharpe'),
+      sortino: document.getElementById('sortino'),
+      positionInfo: document.getElementById('positionInfo'),
+      regimeInfo: document.getElementById('regimeInfo'),
+      turtleInfo: document.getElementById('turtleInfo'),
+      riskDetails: document.getElementById('riskDetails'),
+      tradesBody: document.getElementById('tradesBody'),
+      altcoinCard: document.getElementById('altcoinCard'),
+      lastUpdate: document.getElementById('lastUpdate'),
+      connectionStatus: document.getElementById('connectionStatus'),
+      connectionText: document.getElementById('connectionText')
+    };
+    
+    function setConnected(connected) {
+      els.connectionStatus.classList.toggle('connected', connected);
+      els.connectionText.textContent = connected ? 'Terhubung' : 'Terputus';
+    }
+    
+    function setValue(el, value, positiveClass = null, negativeClass = null) {
+      if (el) {
+        el.textContent = value;
+        el.classList.remove('positive', 'negative', 'warning');
+        if (positiveClass) el.classList.add(positiveClass);
+        if (negativeClass) el.classList.add(negativeClass);
+      }
+    }
+    
+    async function fetchStatus() {
+      try {
+        const url = currentPrice ? `${API_BASE}/status?price=${currentPrice}` : `${API_BASE}/status`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('Status fetch failed');
+        const data = await res.json();
+        return data.data;
+      } catch (e) {
+        console.error('Status fetch error:', e);
+        return null;
+      }
+    }
+    
+    async function fetchTrades() {
+      try {
+        const res = await fetch(`${API_BASE}/trades?limit=20`);
+        if (!res.ok) throw new Error('Trades fetch failed');
+        const data = await res.json();
+        return data.data.trades || [];
+      } catch (e) {
+        console.error('Trades fetch error:', e);
+        return [];
+      }
+    }
+    
+    async function fetchRegime() {
+      try {
+        const res = await fetch(`${API_BASE}/regime`);
+        if (!res.ok) throw new Error('Regime fetch failed');
+        const data = await res.json();
+        return data.data;
+      } catch (e) {
+        console.error('Regime fetch error:', e);
+        return null;
+      }
+    }
+    
+    async function fetchTurtle() {
+      try {
+        const res = await fetch(`${API_BASE}/turtle`);
+        if (!res.ok) throw new Error('Turtle fetch failed');
+        const data = await res.json();
+        return data.data;
+      } catch (e) {
+        console.error('Turtle fetch error:', e);
+        return null;
+      }
+    }
+    
+    function renderStatus(data) {
+      if (!data) return;
+      
+      setValue(els.totalEquity, fmtIdr(data.equity));
+      setValue(els.cash, fmtIdr(data.cash));
+      setValue(els.positionValue, fmtIdr(data.positionValue || 0));
+      setValue(els.unrealizedPnl, fmtIdr(data.unrealizedPnl || 0), 
+        data.unrealizedPnl >= 0 ? 'positive' : 'negative');
+      
+      setValue(els.totalPnl, fmtIdr(data.pnl), data.pnl >= 0 ? 'positive' : 'negative');
+      setValue(els.winRate, fmtPct(data.winRate || 0));
+      setValue(els.totalTrades, data.closedTrades || 0);
+      setValue(els.roe, fmtPct(data.roe || 0), data.roe >= 0 ? 'positive' : 'negative');
+      
+      setValue(els.maxDrawdown, fmtPct(data.maxDrawdown || 0), null, 'negative');
+      setValue(els.currentDrawdown, fmtPct(data.drawdown || 0), null, data.drawdown > 0.1 ? 'negative' : 'positive');
+      
+      const risk = data.riskMetrics || {};
+      setValue(els.sharpe, fmtNum(risk.sharpeRatio || 0));
+      setValue(els.sortino, fmtNum(risk.sortinoRatio || 0));
+      
+      // Position
+      if (data.position) {
+        const pos = data.position;
+        const pnlPct = pos.entryPrice ? ((data.currentPrice - pos.entryPrice) / pos.entryPrice * 100) : 0;
+        els.positionInfo.innerHTML = `
+          <div class="position-row">
+            <div class="position-item">
+              <div class="position-label">Entry Price</div>
+              <div class="position-value">${fmtIdr(pos.entryPrice)}</div>
+            </div>
+            <div class="position-item">
+              <div class="position-label">Current Price</div>
+              <div class="position-value">${fmtIdr(data.currentPrice)}</div>
+            </div>
+            <div class="position-item">
+              <div class="position-label">Quantity</div>
+              <div class="position-value">${fmtBtc(pos.btc)} BTC</div>
+            </div>
+            <div class="position-item">
+              <div class="position-label">Unrealized PnL</div>
+              <div class="position-value ${pnlPct >= 0 ? 'positive' : 'negative'}">
+                ${fmtIdr(data.unrealizedPnl || 0)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)
+              </div>
+            </div>
+            <div class="position-item">
+              <div class="position-label">Stop Loss</div>
+              <div class="position-value">${fmtIdr(pos.stopLoss || 0)}</div>
+            </div>
+            <div class="position-item">
+              <div class="position-label">Trailing Stop</div>
+              <div class="position-value">${fmtIdr(pos.trailingStop || 0)}</div>
+            </div>
+            <div class="position-item">
+              <div class="position-label">Peak Price</div>
+              <div class="position-value">${fmtIdr(pos.peakPrice || 0)}</div>
+            </div>
+            <div class="position-item">
+              <div class="position-label">Size Multiplier</div>
+              <div class="position-value">${(pos.sizeMultiplier || 1).toFixed(2)}x</div>
+            </div>
+          </div>
+        `;
+      } else {
+        els.positionInfo.innerHTML = '<div class="loading">Tidak ada posisi aktif</div>';
+      }
+    }
+    
+    function renderRegime(data) {
+      if (!data) {
+        els.regimeInfo.innerHTML = '<div class="loading">Regime detection tidak tersedia</div>';
+        return;
+      }
+      
+      const regimeClass = data.regime ? data.regime.toLowerCase() : 'unknown';
+      els.regimeInfo.innerHTML = `
+        <div style="text-align: center; padding: 20px 0;">
+          <span class="regime-badge regime-${regimeClass}">${data.regime || 'UNKNOWN'}</span>
+          <div style="margin-top: 16px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; text-align: left;">
+            <div>
+              <div class="metric-label">Volatilitas</div>
+              <div class="metric-value">${fmtPct(data.volatility || 0)}</div>
+            </div>
+            <div>
+              <div class="metric-label">Trend Strength</div>
+              <div class="metric-value">${fmtPct(data.trendStrength || 0)}</div>
+            </div>
+            <div>
+              <div class="metric-label">Trend Direction</div>
+              <div class="metric-value">${data.trendDirection || '-'}</div>
+            </div>
+            <div>
+              <div class="metric-label">Volume Trend</div>
+              <div class="metric-value">${(data.volumeTrend || 1).toFixed(2)}x</div>
+            </div>
+          </div>
+          ${data.adjustedParams ? `
+            <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);">
+              <div class="metric-label">Adjusted Parameters</div>
+              <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; font-size: 0.8125rem;">
+                <div>Momentum: <strong>${(data.adjustedParams.momentumMultiplier || 1).toFixed(1)}x</strong></div>
+                <div>Stop: <strong>${(data.adjustedParams.stopMultiplier || 1).toFixed(1)}x</strong></div>
+                <div>Size: <strong>${(data.adjustedParams.positionSizeMultiplier || 1).toFixed(1)}x</strong></div>
+              </div>
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }
+    
+    function renderTurtle(data) {
+      if (!data) {
+        els.turtleInfo.innerHTML = '<div class="loading">Turtle protection tidak tersedia</div>';
+        return;
+      }
+      
+      const levels = data.levels || [0.10, 0.15, 0.20, 0.25];
+      const reductions = data.reductions || [0.5, 0.3, 0.2, 0.1];
+      const currentDrawdown = data.drawdown || 0;
+      const activeLevel = data.level || 0;
+      const recovered = data.recovered || false;
+      
+      let html = '';
+      if (recovered) {
+        html += '<div class="turtle-level recovered"><span>✅ RECOVERED</span> Drawdown di bawah threshold recovery</div>';
+      } else if (data.active) {
+        html += `<div class="turtle-level active"><span>⚠️ ACTIVE - Level ${activeLevel}</span> Size reduced to ${(reductions[activeLevel-1]*100).toFixed(0)}%</div>`;
+      } else {
+        html += '<div class="turtle-level"><span>✅ NORMAL</span> Tidak ada proteksi aktif</div>';
+      }
+      
+      html += '<div style="margin-top: 12px;">';
+      levels.forEach((level, i) => {
+        const isActive = i < activeLevel;
+        const isCurrent = i === activeLevel - 1 && data.active;
+        html += `
+          <div class="turtle-level ${isCurrent ? 'active' : ''}">
+            <span style="width: 80px;">Level ${i+1} (${(level*100).toFixed(0)}%)</span>
+            <div class="turtle-level-bar">
+              <div class="turtle-level-fill" style="width: ${Math.min(100, (currentDrawdown/level)*100)}%; background: ${isActive ? 'var(--red)' : 'var(--border)'}"></div>
+            </div>
+            <span style="width: 60px; text-align: right;">${(reductions[i]*100).toFixed(0)}%</span>
+          </div>
+        `;
+      });
+      html += '</div>';
+      
+      els.turtleInfo.innerHTML = html;
+    }
+    
+    function renderRiskDetails(data) {
+      if (!data) return;
+      
+      const risk = data.riskMetrics || {};
+      const eff = data.efficiencyMetrics || {};
+      const timing = data.timingMetrics || {};
+      
+      els.riskDetails.innerHTML = `
+        <div class="position-row">
+          <div class="position-item">
+            <div class="position-label">VaR 95%</div>
+            <div class="position-value">${fmtPct(risk.var95 || 0)}</div>
+          </div>
+          <div class="position-item">
+            <div class="position-label">CVaR 95%</div>
+            <div class="position-value">${fmtPct(risk.cvar95 || 0)}</div>
+          </div>
+          <div class="position-item">
+            <div class="position-label">Volatility</div>
+            <div class="position-value">${fmtPct(risk.volatility || 0)}</div>
+          </div>
+          <div class="position-item">
+            <div class="position-label">Capital Turnover</div>
+            <div class="position-value">${fmtNum(eff.capitalTurnover || 0)}</div>
+          </div>
+          <div class="position-item">
+            <div class="position-label">Win/Loss Ratio</div>
+            <div class="position-value">${fmtNum(eff.winLossRatio || 0)}</div>
+          </div>
+          <div class="position-item">
+            <div class="position-label">Expectancy</div>
+            <div class="position-value ${(eff.expectancy || 0) >= 0 ? 'positive' : 'negative'}">${fmtIdr(eff.expectancy || 0)}</div>
+          </div>
+          <div class="position-item">
+            <div class="position-label">Market Timing</div>
+            <div class="position-value">${fmtPct(timing.marketTimingAccuracy || 0)}</div>
+          </div>
+          <div class="position-item">
+            <div class="position-label">Avg Hold Time</div>
+            <div class="position-value">${Math.round(timing.avgHoldTimeHours || 0)} jam</div>
+          </div>
+        </div>
+      `;
+    }
+    
+    function renderTrades(trades) {
+      if (!trades.length) {
+        els.tradesBody.innerHTML = '<tr><td colspan="6" class="loading">Belum ada trade</td></tr>';
+        return;
+      }
+      
+      els.tradesBody.innerHTML = trades.map(t => `
+        <tr>
+          <td>${new Date(t.timestamp).toLocaleString('id-ID')}</td>
+          <td><span class="trade-type ${t.side?.toLowerCase()}">${t.side}</span></td>
+          <td>${fmtIdr(t.price)}</td>
+          <td>${fmtBtc(t.btc)}</td>
+          <td class="pnl ${(t.realizedPnl || 0) >= 0 ? 'positive' : 'negative'}">${fmtIdr(t.realizedPnl || 0)}</td>
+          <td style="color: var(--text-muted); font-size: 0.75rem;">${t.reason || '-'}</td>
+        </tr>
+      `).join('');
+    }
+
+    function renderAltcoin(data) {
+      if (!data) {
+        els.altcoinCard.innerHTML = '<div class="loading">Altcoin paper tracker tidak tersedia</div>';
+        return;
+      }
+      
+      const positions = data.positions || {};
+      const openPositions = Object.entries(positions);
+      
+      let html = `
+        <div class="position-row">
+          <div class="position-item">
+            <div class="position-label">Modal Awal</div>
+            <div class="position-value">${fmtIdr(data.startingCash || 0)}</div>
+          </div>
+          <div class="position-item">
+            <div class="position-label">Kas Virtual</div>
+            <div class="position-value">${fmtIdr(data.cash || 0)}</div>
+          </div>
+          <div class="position-item">
+            <div class="position-label">Ekuitas</div>
+            <div class="position-value">${fmtIdr(data.equity || 0)}</div>
+          </div>
+          <div class="position-item">
+            <div class="position-label">Total PnL</div>
+            <div class="position-value ${(data.pnl || 0) >= 0 ? 'positive' : 'negative'}">${fmtIdr(data.pnl || 0)}</div>
+          </div>
+          <div class="position-item">
+            <div class="position-label">Posisi Terbuka</div>
+            <div class="position-value">${openPositions.length}</div>
+          </div>
+          <div class="position-item">
+            <div class="position-label">Trade Tertutup</div>
+            <div class="position-value">${data.closedTrades || 0}</div>
+          </div>
+        </div>
+      `;
+      
+      if (data.closedTrades > 0) {
+        const winRate = data.wins ? (data.wins / data.closedTrades * 100).toFixed(1) : 0;
+        html += `
+          <div class="position-row" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);">
+            <div class="position-item">
+              <div class="position-label">Win Rate</div>
+              <div class="position-value">${winRate}%</div>
+            </div>
+            <div class="position-item">
+              <div class="position-label">Winning</div>
+              <div class="position-value positive">${data.wins || 0}</div>
+            </div>
+            <div class="position-item">
+              <div class="position-label">Losing</div>
+              <div class="position-value negative">${data.losses || 0}</div>
+            </div>
+          </div>
+        `;
+      }
+      
+      if (openPositions.length > 0) {
+        html += '<div style="margin-top: 12px;"><strong>Posisi Terbuka:</strong></div>';
+        html += openPositions.map(([symbol, pos]) => {
+          const currentPrice = pos.currentPrice || pos.entryPrice;
+          const pnlPct = pos.entryPrice ? ((currentPrice - pos.entryPrice) / pos.entryPrice * 100) : 0;
+          return `
+            <div style="background: var(--bg); padding: 8px; border-radius: 6px; margin: 4px 0; border: 1px solid var(--border);">
+              <div style="display: flex; justify-content: space-between;">
+                <span><strong>${symbol}</strong></span>
+                <span class="${pnlPct >= 0 ? 'positive' : 'negative'}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%</span>
+              </div>
+              <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px;">
+                Entry: ${fmtIdr(pos.entryPrice)} | Qty: ${fmtBtc(pos.btc)} | Peak: ${fmtIdr(pos.peakPrice || pos.entryPrice)}
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+      
+      // Add rules summary
+      html += `
+        <div style="margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 0.7rem; color: var(--text-muted); line-height: 1.6;">
+          <strong>Aturan:</strong> beli setelah momentum ≥0.5%/15m + 3 sampel naik beruntun. Target +1%; jika belum target dan outlook turun → jual. Setelah target, tahan jika outlook naik; jual saat netral/turun atau trailing 1% dari puncak. Stop 1% jika outlook ≠ naik. Jeda 15m per symbol.
+        </div>
+      `;
+      
+      els.altcoinCard.innerHTML = html;
+    }
+    
+    async function updateDashboard() {
+      const [status, trades, regime, turtle] = await Promise.all([
+        fetchStatus(),
+        fetchTrades(),
+        fetchRegime(),
+        fetchTurtle()
+      ]);
+      
+      // Also fetch altcoin data from status (included in status response)
+      const altcoinData = status?.altcoin || null;
+      
+      if (status) {
+        renderStatus(status);
+        renderRiskDetails(status);
+        setConnected(true);
+        els.lastUpdate.textContent = `Terakhir update: ${new Date().toLocaleTimeString('id-ID')}`;
+      } else {
+        setConnected(false);
+      }
+      
+      if (trades) renderTrades(trades);
+      if (regime) renderRegime(regime);
+      if (turtle) renderTurtle(turtle);
+      if (altcoinData) renderAltcoin(altcoinData);
+    }
+    
+    // Start polling
+    function startPolling() {
+      updateDashboard();
+      updateInterval = setInterval(updateDashboard, 5000); // 5 detik
+    }
+    
+    // Stop polling on page hide
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        clearInterval(updateInterval);
+      } else {
+        startPolling();
+      }
+    });
+    
+    // Initial load
+    startPolling();
+  </script>
+</body>
+</html>
