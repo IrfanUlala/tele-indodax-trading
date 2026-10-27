@@ -223,7 +223,14 @@ async function pollAltcoins() {
       const points = altcoinHistories.get(item.symbol) ?? [];
       const recent = points.filter(point => now - point.at <= 15 * 60_000 && now >= point.at);
       const changePct = recent.length >= 3 ? ((recent.at(-1).price - recent[0].price) / recent[0].price) * 100 : null;
-      const trendConfirmed = recent.length >= 4 && recent.at(-1).price > recent.at(-2).price && recent.at(-2).price > recent.at(-3).price;
+      
+      // Uptrend-based entry confirmation
+      const isUptrend = item.isUptrend ?? false;
+      const minSamplesForTrend = isUptrend ? 3 : 4; // 2 consecutive naik if uptrend, 3 if not
+      const trendConfirmed = recent.length >= minSamplesForTrend && 
+        recent.at(-1).price > recent.at(-2).price && 
+        (isUptrend || recent.at(-2).price > recent.at(-3).price);
+      
       const outlook = marketOutlook(recent, 15 * 60_000, 0.2).direction;
       const result = altcoinPaperTracker.update({ symbol: item.symbol, price, changePct, trendConfirmed, outlook, at: now });
       lastAltcoinPaperPrices.set(item.symbol, price);

@@ -62,6 +62,22 @@ export function formatAltcoinReport({ items = [], thresholdPct = 1, updatedAt = 
   return lines.join('\n');
 }
 
+export function detectUptrend(samples, uptrendRatioPct = 60, minOverallChangePct = 0.5) {
+  if (!Array.isArray(samples) || samples.length < 2) return { isUptrend: false, upRatio: 0, overallChange: 0 };
+  
+  // Count consecutive naik samples
+  let upCount = 0;
+  for (let i = 1; i < samples.length; i++) {
+    if (samples[i].price > samples[i - 1].price) upCount++;
+  }
+  
+  const upRatio = (upCount / (samples.length - 1)) * 100;
+  const overallChange = ((samples.at(-1).price - samples[0].price) / samples[0].price) * 100;
+  const isUptrend = upRatio >= uptrendRatioPct && overallChange >= minOverallChangePct;
+  
+  return { isUptrend, upRatio, overallChange };
+}
+
 export function risingCandidates(histories, { now = Date.now(), windowMs = 15 * 60_000, thresholdPct = 1 } = {}) {
   if (!(windowMs > 0) || !(thresholdPct > 0)) return [];
   const output = [];
@@ -72,7 +88,10 @@ export function risingCandidates(histories, { now = Date.now(), windowMs = 15 * 
     const latest = samples.at(-1).price;
     if (!(first > 0) || !(latest > 0)) continue;
     const changePct = ((latest - first) / first) * 100;
-    if (changePct >= thresholdPct) output.push({ symbol, changePct, price: latest, observedAt: samples.at(-1).at });
+    if (changePct >= thresholdPct) {
+      const uptrend = detectUptrend(samples);
+      output.push({ symbol, changePct, price: latest, observedAt: samples.at(-1).at, isUptrend: uptrend.isUptrend, upRatio: uptrend.upRatio, overallChange: uptrend.overallChange });
+    }
   }
   return output.sort((a, b) => b.changePct - a.changePct);
 }
