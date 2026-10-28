@@ -1,16 +1,6 @@
 {
-  "cash": 24095,
-  "positions": {
-    "pepe": {
-      "symbol": "pepe",
-      "entryPrice": 0.087499,
-      "peakPrice": 0.087499,
-      "quantity": 92081.05235488406,
-      "spent": 8057,
-      "openedAt": "2026-10-28T06:21:15.083Z",
-      "targetReached": false
-    }
-  },
+  "cash": 32038,
+  "positions": {},
   "ledger": [
     {
       "action": "BUY",
@@ -932,14 +922,211 @@
       "entryPrice": 533,
       "peakPrice": 535,
       "realizedPnl": -321
+    },
+    {
+      "action": "BUY",
+      "symbol": "beat",
+      "at": "2026-10-28T07:45:45.879Z",
+      "price": 1969,
+      "idr": 6023,
+      "quantity": 3.058913153885221,
+      "signal": "MOMENTUM_UP",
+      "changePct": 2.1265560165975104,
+      "outlook": "NETRAL / SIDEWAYS"
+    },
+    {
+      "action": "SELL",
+      "symbol": "pepe",
+      "at": "2026-10-28T07:59:57.363Z",
+      "price": 0.088397,
+      "idr": 8139,
+      "quantity": 92081.05235488406,
+      "signal": "OUTLOOK_TURNED_DOWN",
+      "drawdownPct": 0,
+      "profitPct": 1.0262974433993646,
+      "outlook": "BELUM CUKUP DATA",
+      "entryPrice": 0.087499,
+      "peakPrice": 0.088397,
+      "realizedPnl": 82
+    },
+    {
+      "action": "BUY",
+      "symbol": "haedal",
+      "at": "2026-10-28T08:03:17.113Z",
+      "price": 530,
+      "idr": 6552,
+      "quantity": 12.362264150943396,
+      "signal": "MOMENTUM_UP",
+      "changePct": 1.338432122370937,
+      "outlook": "CENDERUNG NAIK"
+    },
+    {
+      "action": "SELL",
+      "symbol": "beat",
+      "at": "2026-10-28T08:16:47.791Z",
+      "price": 1859,
+      "idr": 5686,
+      "quantity": 3.058913153885221,
+      "signal": "ENTRY_STOP",
+      "drawdownPct": -5.634517766497462,
+      "profitPct": -5.58659217877095,
+      "outlook": "NETRAL / SIDEWAYS",
+      "entryPrice": 1969,
+      "peakPrice": 1970,
+      "realizedPnl": -337
+    },
+    {
+      "action": "SELL",
+      "symbol": "haedal",
+      "at": "2026-10-28T08:24:05.522Z",
+      "price": 536,
+      "idr": 6626,
+      "quantity": 12.362264150943396,
+      "signal": "OUTLOOK_NEUTRAL",
+      "drawdownPct": 0,
+      "profitPct": 1.1320754716981132,
+      "outlook": "NETRAL / SIDEWAYS",
+      "entryPrice": 530,
+      "peakPrice": 536,
+      "realizedPnl": 74
+    },
+    {
+      "action": "BUY",
+      "symbol": "pepe",
+      "at": "2026-10-28T08:27:23.277Z",
+      "price": 0.089859,
+      "idr": 7992,
+      "quantity": 88939.33829666478,
+      "signal": "MOMENTUM_UP",
+      "changePct": 1.0162441683997392,
+      "outlook": "CENDERUNG NAIK"
+    },
+    {
+      "action": "BUY",
+      "symbol": "haedal",
+      "at": "2026-10-28T08:44:23.107Z",
+      "price": 575,
+      "idr": 5994,
+      "quantity": 10.424347826086956,
+      "signal": "MOMENTUM_UP",
+      "changePct": 2.1314387211367674,
+      "outlook": "NETRAL / SIDEWAYS"
+    },
+    {
+      "action": "SELL",
+      "symbol": "haedal",
+      "at": "2026-10-28T09:30:17.560Z",
+      "price": 583,
+      "idr": 6077,
+      "quantity": 10.424347826086956,
+      "signal": "OUTLOOK_TURNED_DOWN",
+      "drawdownPct": 0,
+      "profitPct": 1.391304347826087,
+      "outlook": "BELUM CUKUP DATA",
+      "entryPrice": 575,
+      "peakPrice": 583,
+      "realizedPnl": 83
+    },
+    {
+      "action": "BUY",
+      "symbol": "beat",
+      "at": "2026-10-28T09:37:23.345Z",
+      "price": 1617,
+      "idr": 6015,
+      "quantity": 3.7198515769944343,
+      "signal": "MOMENTUM_UP",
+      "changePct": 1.0625,
+      "outlook": "NETRAL / SIDEWAYS"
+    },
+    {
+      "action": "SELL",
+      "symbol": "pepe",
+      "at": "2026-10-28T09:55:07.980Z",
+      "price": 0.091001,
+      "idr": 8093,
+      "quantity": 88939.33829666478,
+      "signal": "OUTLOOK_TURNED_DOWN",
+      "drawdownPct": 0,
+      "profitPct": 1.2708799341190133,
+      "outlook": "BELUM CUKUP DATA",
+      "entryPrice": 0.089859,
+      "peakPrice": 0.091001,
+      "realizedPnl": 101
+    },
+    {
+      "action": "SELL",
+      "symbol": "beat",
+      "at": "2026-10-28T10:13:06.871Z",
+      "price": 1536,
+      "idr": 5713,
+      "quantity": 3.7198515769944343,
+      "signal": "ENTRY_STOP",
+      "drawdownPct": -5.41871921182266,
+      "profitPct": -5.009276437847866,
+      "outlook": "NETRAL / SIDEWAYS",
+      "entryPrice": 1617,
+      "peakPrice": 1624,
+      "realizedPnl": -302
+    },
+    {
+      "action": "BUY",
+      "symbol": "haedal",
+      "at": "2026-10-28T10:21:36.866Z",
+      "price": 599,
+      "idr": 7963,
+      "quantity": 13.29382303839733,
+      "signal": "MOMENTUM_UP",
+      "changePct": 1.5254237288135595,
+      "outlook": "NETRAL / SIDEWAYS"
+    },
+    {
+      "action": "SELL",
+      "symbol": "haedal",
+      "at": "2026-10-28T10:24:21.872Z",
+      "price": 606,
+      "idr": 8056,
+      "quantity": 13.29382303839733,
+      "signal": "OUTLOOK_NEUTRAL",
+      "drawdownPct": 0,
+      "profitPct": 1.1686143572621035,
+      "outlook": "NETRAL / SIDEWAYS",
+      "entryPrice": 599,
+      "peakPrice": 606,
+      "realizedPnl": 93
+    },
+    {
+      "action": "BUY",
+      "symbol": "beat",
+      "at": "2026-10-28T10:28:21.902Z",
+      "price": 1556,
+      "idr": 7986,
+      "quantity": 5.132390745501286,
+      "signal": "MOMENTUM_UP",
+      "changePct": 1.1046133853151396,
+      "outlook": "NETRAL / SIDEWAYS"
+    },
+    {
+      "action": "SELL",
+      "symbol": "beat",
+      "at": "2026-10-28T10:29:36.871Z",
+      "price": 1574,
+      "idr": 8078,
+      "quantity": 5.132390745501286,
+      "signal": "OUTLOOK_NEUTRAL",
+      "drawdownPct": 0,
+      "profitPct": 1.1568123393316194,
+      "outlook": "NETRAL / SIDEWAYS",
+      "entryPrice": 1556,
+      "peakPrice": 1574,
+      "realizedPnl": 92
     }
   ],
   "cooldownUntil": {
-    "beat": 1793173410914,
+    "beat": 1793184276871,
     "br": 1793157793849,
-    "pepe": 1793158888943,
+    "pepe": 1793182207980,
     "hype": 1793119362887,
     "fartcoin": 1793154703766,
-    "haedal": 1793173830941
+    "haedal": 1793183961872
   }
 }

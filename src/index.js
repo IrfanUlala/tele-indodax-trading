@@ -10,6 +10,7 @@ import { TradeFlow, OrderControl, validateLiveConfig } from './trade-flow.js';
 import { formatStatus } from './status.js';
 import { formatPaperReport, loadPaperTracker } from './paper-trading.js';
 import { formatAltcoinPaperReport, formatAltcoinPaperTrade, loadAltcoinPaperTracker } from './altcoin-paper.js';
+import { formatLiveAltcoinReport, formatLiveAltcoinTrade, loadLiveAltcoinTracker } from './altcoin-live.js';
 import { callbackNotice } from './callback-notice.js';
 import { rankIdrPairs, scanTopPairs, formatAltcoinReport as renderAltcoinReport, formatAltcoinAlert } from './altcoin-scanner.js';
 import { startDashboardServer, setPaperTracker, setAltcoinPaperTracker } from './dashboard/server.js';
@@ -99,6 +100,33 @@ const altcoinPaperFile = path.join(path.dirname(fileURLToPath(import.meta.url)),
 const altcoinPaperTracker = loadAltcoinPaperTracker({ file: altcoinPaperFile, startingCash: Number(process.env.ALTCOIN_PAPER_STARTING_IDR || 31000), fraction: 0.25, stopDropPct: 5 });
 const lastAltcoinPaperPrices = new Map();
 setAltcoinPaperTracker(altcoinPaperTracker, lastAltcoinPaperPrices);
+
+const altcoinLiveFile = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'altcoin-live-trading.json');
+let altcoinLiveTracker = null;
+if (liveConfig && process.env.INDODAX_API_KEY && process.env.INDODAX_API_SECRET) {
+  const tradeApi = new IndodaxPrivateApi({ key: process.env.INDODAX_API_KEY, secret: process.env.INDODAX_API_SECRET });
+  altcoinLiveTracker = loadLiveAltcoinTracker({
+    file: altcoinLiveFile,
+    startingCash: Number(process.env.ALTCOIN_LIVE_STARTING_IDR || 31000),
+    fraction: 0.25,
+    stopDropPct: 5,
+    api: tradeApi,
+    orderControl,
+    auditFile: path.join(logDir, 'orders.jsonl'),
+    maxDeviationPct: Number(process.env.MAX_PRICE_DEVIATION_PCT || 2),
+    getMarketPrice: async (symbol) => {
+      const response = await fetch(`https://indodax.com/api/ticker/${symbol.toLowerCase()}`, { signal: AbortSignal.timeout(5000) });
+      if (!response.ok) return null;
+      const data = await response.json();
+      return Number(data?.ticker?.last);
+    },
+    sendAlert: async (text) => sendTelegram(text)
+  });
+  console.log('[altcoin-live] Live altcoin trading AKTIF (Rp13.000/order, fee 0.1%)');
+} else {
+  console.log('[altcoin-live] Live altcoin trading NONAKTIF (LIVE_TRADING_ENABLED=false atau kredensial kurang)');
+}
+
 let latest = null;
 let lastAlertAt = 0;
 let ws = null;
@@ -140,7 +168,7 @@ function processPrice(price, source) {
     const winRateText = report.closedTrades > 0 ? `${(winRate * 100).toFixed(0)}% (${report.profitTrades}/${report.closedTrades})` : 'N/A (belum ada trade)';
     const sampleCount = windowHistory.length;
     const entryAmount = trade.action === 'BUY' ? `Rp${trade.idr.toLocaleString('id-ID')}` : `Rp${Math.abs(trade.realizedPnl).toLocaleString('id-ID')}`;
-    
+
     const msg = `🟢 ${trade.action === 'BUY' ? 'BELI' : 'JUAL'} BTC/IDR
 ├─ Win rate: ${winRateText}
 ├─ Signal: ${signal.changePct.toFixed(2)}% (${signal.type})
@@ -168,7 +196,7 @@ function connectMarketSocket() {
     console.log('WebSocket disabled; using REST polling fallback');
     return;
   }
-  if (ws) { try { ws.terminate(); } catch {} }
+  if (ws) { try { ws.terminate(); } catch { } }
   if (wsPingTimer) clearInterval(wsPingTimer);
   ws = new WebSocket('wss://ws3.indodax.com/ws/');
   let subscribed = false;
@@ -230,20 +258,29 @@ async function pollAltcoins() {
       const points = altcoinHistories.get(item.symbol) ?? [];
       const recent = points.filter(point => now - point.at <= 15 * 60_000 && now >= point.at);
       const changePct = recent.length >= 3 ? ((recent.at(-1).price - recent[0].price) / recent[0].price) * 100 : null;
-      
+
       // Uptrend-based entry confirmation
       const isUptrend = item.isUptrend ?? false;
       const minSamplesForTrend = isUptrend ? 3 : 4; // 2 consecutive naik if uptrend, 3 if not
-      const trendConfirmed = recent.length >= minSamplesForTrend && 
-        recent.at(-1).price > recent.at(-2).price && 
+      const trendConfirmed = recent.length >= minSamplesForTrend &&
+        recent.at(-1).price > recent.at(-2).price &&
         (isUptrend || recent.at(-2).price > recent.at(-3).price);
-      
+
       const outlook = marketOutlook(recent, 15 * 60_000, 0.2).direction;
       const result = altcoinPaperTracker.update({ symbol: item.symbol, price, changePct, trendConfirmed, outlook, at: now });
       lastAltcoinPaperPrices.set(item.symbol, price);
       if (result.action) {
         const altcoinReport = altcoinPaperTracker.report(lastAltcoinPaperPrices);
         void sendTelegram(formatAltcoinPaperTrade(result.trade, altcoinReport));
+      }
+
+      // Live altcoin trading (after paper update)
+      if (altcoinLiveTracker) {
+        const liveResult = altcoinLiveTracker.update({ symbol: item.symbol, price, changePct, trendConfirmed, outlook, at: now });
+        if (liveResult.action) {
+          const liveReport = await altcoinLiveTracker.report(lastAltcoinPaperPrices);
+          void sendTelegram(formatLiveAltcoinTrade(liveResult.trade, liveReport));
+        }
       }
     }
     altcoinLastScanAt = new Date(now).toISOString();
@@ -293,6 +330,12 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
   bot.command('altcoins', async ctx => {
     if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
     await ctx.reply(formatAltcoinReport());
+  });
+  bot.command('altcoinslive', async ctx => {
+    if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
+    if (!altcoinLiveTracker) return await ctx.reply('Live altcoin trading tidak aktif. Set LIVE_TRADING_ENABLED=true dan kredensial API.');
+    const report = await altcoinLiveTracker.report(lastAltcoinPaperPrices);
+    await ctx.reply(formatLiveAltcoinReport(report));
   });
   bot.command('rule', async ctx => {
     if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
@@ -422,7 +465,7 @@ Stop Loss:
   bot.command('selesai', async ctx => {
     if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
     position = null; pendingSell = false;
-    try { fs.unlinkSync(dataFile); } catch {}
+    try { fs.unlinkSync(dataFile); } catch { }
     await ctx.reply('Pencatatan posisi ditutup. Gunakan /beli <harga_IDR> setelah pembelian manual berikutnya.');
   });
   bot.command('status', async ctx => {

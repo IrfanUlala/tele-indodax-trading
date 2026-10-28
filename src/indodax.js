@@ -56,6 +56,7 @@ export class IndodaxPrivateApi {
     this.secret = secret;
     this.fetchImpl = fetchImpl;
     this.lastNonce = 0;
+    this.pairsCache = null;
   }
 
   async call(method, params = {}, httpMethod = 'GET') {
@@ -83,14 +84,28 @@ export class IndodaxPrivateApi {
 
   async getInfo() { return this.call('account'); }
 
-  async createOrder({ side, quoteAmount, quantity }) {
+  async getPairs() {
+    if (this.pairsCache) return this.pairsCache;
+    const response = await fetch('https://indodax.com/api/pairs', { signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error(`Pairs HTTP ${response.status}`);
+    const data = await response.json();
+    this.pairsCache = data;
+    return data;
+  }
+
+  async getPairInfo(symbol) {
+    const pairs = await this.getPairs();
+    return pairs.find(p => p.id === symbol.toLowerCase()) ?? null;
+  }
+
+  async createOrder({ symbol = 'BTCIDR', side, quoteAmount, quantity }) {
     if (!['BUY', 'SELL'].includes(side)) throw new Error('Sisi order tidak valid.');
-    const params = { symbol: 'BTCIDR', side, type: 'MARKET', recvWindow: '5000' };
+    const params = { symbol: symbol.toUpperCase(), side, type: 'MARKET', recvWindow: '5000' };
     if (side === 'BUY') {
       if (!Number.isFinite(quoteAmount) || quoteAmount < 1) throw new Error('Nominal IDR order tidak valid.');
       params.quoteOrderQty = String(Math.floor(quoteAmount));
     } else {
-      if (!Number.isFinite(quantity) || quantity <= 0) throw new Error('Jumlah BTC order tidak valid.');
+      if (!Number.isFinite(quantity) || quantity <= 0) throw new Error('Jumlah order tidak valid.');
       params.quantity = String(quantity);
     }
     return this.call('order', params, 'POST');

@@ -35,7 +35,7 @@ const roundDown = (value, increment) => {
   return Math.floor(v / i) * i / factor;
 };
 const withinDeviation = (reviewPrice, currentPrice, maxPct) => Math.abs(currentPrice - reviewPrice) / reviewPrice * 100 <= maxPct;
-export { plainDecimal, roundDown, withinDeviation };
+export { plainDecimal, roundDown, withinDeviation, appendAudit };
 export class OrderSafetyError extends Error { constructor(message, code = 'ORDER_BLOCKED') { super(message); this.code = code; } }
 
 export class OrderControl {
