@@ -96,7 +96,7 @@ const paperFile = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 
 const paperTracker = loadPaperTracker({ file: paperFile, startingCash: Number(process.env.PAPER_STARTING_IDR || 31000), fraction: 0.25 });
 setPaperTracker(paperTracker);
 const altcoinPaperFile = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'altcoin-paper-trading.json');
-const altcoinPaperTracker = loadAltcoinPaperTracker({ file: altcoinPaperFile, startingCash: Number(process.env.ALTCOIN_PAPER_STARTING_IDR || 31000), fraction: 0.25, stopDropPct: 1 });
+const altcoinPaperTracker = loadAltcoinPaperTracker({ file: altcoinPaperFile, startingCash: Number(process.env.ALTCOIN_PAPER_STARTING_IDR || 31000), fraction: 0.25, stopDropPct: 5 });
 const lastAltcoinPaperPrices = new Map();
 setAltcoinPaperTracker(altcoinPaperTracker, lastAltcoinPaperPrices);
 let latest = null;

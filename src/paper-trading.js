@@ -34,7 +34,7 @@ const CONFIG = {
   
   // Take profit / Stop loss (percentage)
   takeProfitPct: 0.5,
-  stopLossPct: 0.3,
+  stopLossPct: 5.0,
   
   // Regime detection
   regimeDetectionWindow: 50,

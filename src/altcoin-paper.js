@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export class AltcoinPaperTracker {
-  constructor({ startingCash = 31000, fraction = 0.25, stopDropPct = 1, cooldownMs = 15 * 60_000, state = null, save = null } = {}) {
+  constructor({ startingCash = 31000, fraction = 0.25, stopDropPct = 5, cooldownMs = 15 * 60_000, state = null, save = null } = {}) {
     if (!(startingCash > 0) || !(fraction > 0 && fraction <= 1) || !(stopDropPct > 0)) throw new Error('Invalid altcoin paper settings.');
     this.startingCash = startingCash;
     this.fraction = fraction;
@@ -35,7 +35,7 @@ export class AltcoinPaperTracker {
         const signal = stopTriggered ? targetReached ? 'TRAILING_STOP' : 'ENTRY_STOP' : outlook === 'NETRAL / SIDEWAYS' ? 'OUTLOOK_NEUTRAL' : 'OUTLOOK_TURNED_DOWN';
         if (targetReached && outlook === 'CENDERUNG NAIK' && stopTriggered) {
           this.persist();
-          return { action: null, reason: 'Trailing stop 1% tercapai, tetapi outlook masih naik; posisi ditahan.' };
+          return { action: null, reason: 'Trailing stop 5% tercapai, tetapi outlook masih naik; posisi ditahan.' };
         }
         const trade = { action: 'SELL', symbol, at: new Date(at).toISOString(), price, idr: proceeds, quantity: position.quantity, signal, drawdownPct, profitPct, outlook, entryPrice: position.entryPrice, peakPrice: position.peakPrice, realizedPnl };
         this.state.cash += proceeds;
@@ -46,7 +46,7 @@ export class AltcoinPaperTracker {
         return { action: 'SELL', trade };
       }
       this.persist();
-      return { action: null, reason: targetReached ? 'Target 1% tercapai; posisi ditahan karena outlook masih naik, dengan trailing stop 1%.' : 'Posisi dipantau; target profit 1% atau stop rugi 1% belum tercapai.' };
+      return { action: null, reason: targetReached ? 'Target 1% tercapai; posisi ditahan karena outlook masih naik, dengan trailing stop 5%.' : 'Posisi dipantau; target profit 1% atau stop rugi 5% belum tercapai.' };
     }
     if (!(Number.isFinite(changePct) && changePct >= 1) || trendConfirmed !== true || at < (this.state.cooldownUntil[symbol] ?? 0) || !(this.state.cash > 0)) return { action: null, reason: 'Momentum atau konfirmasi tren belum cukup, masih cooldown, atau kas simulasi habis.' };
     const spent = Math.floor(this.state.cash * this.fraction);
@@ -74,7 +74,7 @@ export class AltcoinPaperTracker {
   }
 }
 
-export function loadAltcoinPaperTracker({ file, startingCash = 31000, fraction = 0.25, stopDropPct = 1 } = {}) {
+export function loadAltcoinPaperTracker({ file, startingCash = 31000, fraction = 0.25, stopDropPct = 5 } = {}) {
   let state = null;
   try { state = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const save = next => {
@@ -108,7 +108,7 @@ export function formatAltcoinPaperTrade(trade, report = null) {
       `├─ Outlook: ${trade.outlook ?? 'CENDERUNG NAIK'}`,
       `├─ Entry: ${money(trade.idr)}`,
       `├─ Harga: Rp${price}`,
-      `└─ Target: +1%, Stop: -1%`,
+      `└─ Target: +1%, Stop: -5%`,
       '',
       'Simulasi saja — cek /paper untuk laporan lengkap',
     ].join('\n');
@@ -118,7 +118,7 @@ export function formatAltcoinPaperTrade(trade, report = null) {
     `🟢 JUAL ${trade.symbol.toUpperCase()}/IDR`,
     `├─ Harga jual: Rp${price}`,
     `├─ Hasil vs entry: ${(trade.profitPct ?? 0) >= 0 ? '+' : ''}${(trade.profitPct ?? 0).toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`,
-    `├─ Pemicu: ${{ ENTRY_STOP: 'turun 1% dari entry', TRAILING_STOP: 'turun 1% dari puncak', OUTLOOK_NEUTRAL: 'outlook menjadi netral', OUTLOOK_TURNED_DOWN: 'outlook berbalik turun' }[trade.signal] ?? trade.signal}`,
+    `├─ Pemicu: ${{ ENTRY_STOP: 'turun 5% dari entry', TRAILING_STOP: 'turun 5% dari puncak', OUTLOOK_NEUTRAL: 'outlook menjadi netral', OUTLOOK_TURNED_DOWN: 'outlook berbalik turun' }[trade.signal] ?? trade.signal}`,
     `└─ P/L simulasi: ${trade.realizedPnl >= 0 ? '+' : '-'}${money(Math.abs(trade.realizedPnl))}`,
     '',
     'Simulasi saja — cek /paper untuk laporan lengkap',
@@ -145,6 +145,6 @@ export function formatAltcoinPaperReport(report) {
   } else {
     lines.push('Transaksi tertutup: 0 — belum ada trade yang selesai');
   }
-  lines.push('', 'Aturan: beli setelah momentum ≥0.5%/15 menit + 3 sampel naik BERUNTUN. Target +1%; jika belum target dan outlook turun → jual. Setelah target tercapai, tahan jika outlook naik; jual saat netral/turun atau trailing stop 1% dari puncak. Stop rugi 1% jika outlook ≠ naik. Jeda 15 menit setelah jual per symbol.', 'Simulasi saja—tidak memakai saldo atau order Indodax.');
+  lines.push('', 'Aturan: beli setelah momentum ≥0.5%/15 menit + 3 sampel naik BERUNTUN. Target +1%; jika belum target dan outlook turun → jual. Setelah target tercapai, tahan jika outlook naik; jual saat netral/turun atau trailing stop 5% dari puncak. Stop rugi 5% jika outlook ≠ naik. Jeda 15 menit setelah jual per symbol.', 'Simulasi saja—tidak memakai saldo atau order Indodax.');
   return lines.join('\n');
 }
