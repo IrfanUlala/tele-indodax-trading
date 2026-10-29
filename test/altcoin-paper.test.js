@@ -58,12 +58,12 @@ test('holds at one-percent entry loss when outlook still tends upward', () => {
   assert.equal(tracker.state.positions.skyai.entryPrice, 100);
 });
 
-test('sells below target on one-percent entry loss when outlook is neutral', () => {
+test('sells below target on five-percent entry loss when outlook is neutral', () => {
   const tracker = new AltcoinPaperTracker({ startingCash: 31000, fraction: 0.25 });
   tracker.update({ symbol: 'skyai', price: 100, changePct: 1.2, trendConfirmed: true, at: 1000 });
-  const result = tracker.update({ symbol: 'skyai', price: 98.9, outlook: 'NETRAL / SIDEWAYS', at: 2000 });
+  const result = tracker.update({ symbol: 'skyai', price: 95, outlook: 'NETRAL / SIDEWAYS', at: 2000 });
   assert.equal(result.action, 'SELL');
-  assert.equal(result.trade.signal, 'ENTRY_STOP');
+  assert.equal(result.trade.signal, 'HARD_STOP_5PCT');
 });
 
 test('opens a separate virtual altcoin position on qualifying upward momentum', () => {

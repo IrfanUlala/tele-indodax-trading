@@ -1,0 +1,54 @@
+{
+  "cash": 31000,
+  "positions": {
+    "BEATIDR": {
+      "symbol": "BEATIDR",
+      "entryPrice": 1487,
+      "peakPrice": 1487,
+      "quantity": null,
+      "spent": 13000,
+      "openedAt": "2026-10-28T11:35:27.262Z",
+      "targetReached": false,
+      "orderId": 14026342
+    },
+    "PEPEIDR": {
+      "symbol": "PEPEIDR",
+      "entryPrice": 0.090499,
+      "peakPrice": 0.090499,
+      "quantity": 143504,
+      "spent": 13000,
+      "openedAt": "2026-10-28T11:57:36.569Z",
+      "targetReached": false,
+      "orderId": 65192012
+    }
+  },
+  "ledger": [
+    {
+      "action": "BUY",
+      "symbol": "BEATIDR",
+      "at": "2026-10-28T11:35:27.262Z",
+      "price": 1487,
+      "idr": 13000,
+      "quantity": null,
+      "fee": 13,
+      "signal": "MOMENTUM_UP",
+      "changePct": 7.209805335255948,
+      "outlook": "NETRAL / SIDEWAYS",
+      "orderId": 14026342
+    },
+    {
+      "action": "BUY",
+      "symbol": "PEPEIDR",
+      "at": "2026-10-28T11:57:36.569Z",
+      "price": 0.090499,
+      "idr": 13000,
+      "quantity": 143504,
+      "fee": 13,
+      "signal": "MOMENTUM_UP",
+      "changePct": 0.519820950561469,
+      "outlook": "NETRAL / SIDEWAYS",
+      "orderId": 65192012
+    }
+  ],
+  "cooldownUntil": {}
+}

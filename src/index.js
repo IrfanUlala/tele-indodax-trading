@@ -110,6 +110,7 @@ if (liveConfig && process.env.INDODAX_API_KEY && process.env.INDODAX_API_SECRET)
     startingCash: Number(process.env.ALTCOIN_LIVE_STARTING_IDR || 31000),
     fraction: 0.25,
     stopDropPct: 5,
+    entryThresholdPct: Number(process.env.ALTCOIN_ENTRY_THRESHOLD_PCT || 1),
     api: tradeApi,
     orderControl,
     auditFile: path.join(logDir, 'orders.jsonl'),
@@ -335,7 +336,7 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
     if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;
     if (!altcoinLiveTracker) return await ctx.reply('Live altcoin trading tidak aktif. Set LIVE_TRADING_ENABLED=true dan kredensial API.');
     const report = await altcoinLiveTracker.report(lastAltcoinPaperPrices);
-    await ctx.reply(formatLiveAltcoinReport(report));
+    await ctx.reply(formatLiveAltcoinReport(report, altcoinLiveTracker.entryThresholdPct));
   });
   bot.command('rule', async ctx => {
     if (String(ctx.chat.id) !== String(process.env.TELEGRAM_CHAT_ID)) return;

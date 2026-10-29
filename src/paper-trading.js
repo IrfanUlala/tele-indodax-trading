@@ -714,27 +714,47 @@ export class PaperTracker {
     }
     
     const position = this.state.position;
-    if (position) {
-      position.peakPrice = Math.max(position.peakPrice ?? position.entryPrice, price);
-      const profitPct = ((price - position.entryPrice) / position.entryPrice) * 100;
-      const targetReached = profitPct >= this.config.takeProfitPct;
-      const drawdownPct = ((price - position.peakPrice) / position.peakPrice) * 100;
-      
-      // Dynamic stop-loss using ATR
-      const atrStopPrice = position.entryPrice - (this.state.atr || 0) * this.config.atrStopMultiplier;
-      const trailingStopPrice = position.peakPrice * (1 - this.config.trailingStopMultiplier / 100);
-      
-      const atrStopTriggered = price <= atrStopPrice;
-      const trailingStopTriggered = price <= trailingStopPrice && targetReached;
-      const outlookExit = targetReached && outlook !== 'CENDERUNG NAIK';
-      
-      const stopTriggered = targetReached ? (drawdownPct <= -this.config.takeProfitPct || atrStopTriggered || trailingStopTriggered) : profitPct <= -this.config.stopLossPct && outlook !== 'CENDERUNG NAIK';
-      
-      const signal_reason = stopTriggered ? targetReached ? 'TRAILING_STOP' : 
-        (atrStopTriggered ? 'ATR_STOP' : (trailingStopTriggered ? 'TRAILING_STOP' : 'ENTRY_STOP')) : 
-        signal?.type === 'WATCH_SELL' ? 'WATCH_SELL' : 'OUTLOOK_NOT_UP';
-      
-      if (stopTriggered || (signal?.type === 'WATCH_SELL') || outlookExit) {
+        if (position) {
+          position.peakPrice = Math.max(position.peakPrice ?? position.entryPrice, price);
+          const profitPct = ((price - position.entryPrice) / position.entryPrice) * 100;
+          const targetReached = profitPct >= this.config.takeProfitPct;
+          const drawdownPct = ((price - position.peakPrice) / position.peakPrice) * 100;
+
+          // HARD STOP LOSS: 5% from entry price - ALWAYS triggers regardless of target/outlook
+          const hardStopLossPct = this.config.stopLossPct; // 5%
+          const hardStopTriggered = profitPct <= -hardStopLossPct;
+
+          // Dynamic stop-loss using ATR (only after target reached)
+          const atrStopPrice = position.entryPrice - (this.state.atr || 0) * this.config.atrStopMultiplier;
+          const trailingStopPrice = position.peakPrice * (1 - this.config.trailingStopMultiplier / 100);
+
+          const atrStopTriggered = price <= atrStopPrice && targetReached;
+          const trailingStopTriggered = price <= trailingStopPrice && targetReached;
+          const outlookExit = targetReached && outlook !== 'CENDERUNG NAIK';
+
+          // Stop triggered if: hard stop (always) OR (after target: ATR/trailing/outlook)
+          const stopTriggered = hardStopTriggered || (targetReached ? (atrStopTriggered || trailingStopTriggered || outlookExit) : false);
+
+          let signal_reason;
+          if (hardStopTriggered) {
+            signal_reason = 'HARD_STOP_5PCT';
+          } else if (targetReached) {
+            if (atrStopTriggered) {
+              signal_reason = 'ATR_STOP';
+            } else if (trailingStopTriggered) {
+              signal_reason = 'TRAILING_STOP';
+            } else if (outlookExit) {
+              signal_reason = 'OUTLOOK_NOT_UP';
+            } else {
+              signal_reason = 'TRAILING_STOP'; // fallback
+            }
+          } else if (signal?.type === 'WATCH_SELL') {
+            signal_reason = 'WATCH_SELL';
+          } else {
+            signal_reason = 'OUTLOOK_NOT_UP';
+          }
+
+          if (stopTriggered || (signal?.type === 'WATCH_SELL') || outlookExit) {
         const proceeds = Math.floor(position.btc * price);
         const fee = Math.floor(proceeds * this.feeRate);
         const net = proceeds - fee;

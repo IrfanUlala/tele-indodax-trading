@@ -27,13 +27,35 @@ export class AltcoinPaperTracker {
       const targetReached = position.targetReached || profitPct >= 1;
       position.targetReached = targetReached;
       const drawdownPct = ((price - position.peakPrice) / position.peakPrice) * 100;
-      const stopTriggered = targetReached ? drawdownPct <= -this.stopDropPct : profitPct <= -this.stopDropPct && outlook !== 'CENDERUNG NAIK';
+
+      // HARD STOP LOSS: 5% from entry price - ALWAYS triggers regardless of target/outlook
+      const hardStopTriggered = profitPct <= -this.stopDropPct;
+
+      // Trailing stop from peak (only after target reached)
+      const trailingStopTriggered = targetReached && drawdownPct <= -this.stopDropPct;
       const outlookExit = targetReached && outlook !== 'CENDERUNG NAIK';
+
+      // Stop triggered if: hard stop (always) OR (after target: trailing/outlook)
+      const stopTriggered = hardStopTriggered || (targetReached ? (trailingStopTriggered || outlookExit) : false);
       if (stopTriggered || outlookExit) {
         const proceeds = Math.floor(position.quantity * price);
         const realizedPnl = proceeds - position.spent;
-        const signal = stopTriggered ? targetReached ? 'TRAILING_STOP' : 'ENTRY_STOP' : outlook === 'NETRAL / SIDEWAYS' ? 'OUTLOOK_NEUTRAL' : 'OUTLOOK_TURNED_DOWN';
-        if (targetReached && outlook === 'CENDERUNG NAIK' && stopTriggered) {
+        let signal;
+        if (hardStopTriggered) {
+          signal = 'HARD_STOP_5PCT';
+        } else if (targetReached) {
+          if (trailingStopTriggered) {
+            signal = 'TRAILING_STOP';
+          } else if (outlookExit) {
+            signal = outlook === 'NETRAL / SIDEWAYS' ? 'OUTLOOK_NEUTRAL' : 'OUTLOOK_TURNED_DOWN';
+          } else {
+            signal = 'TRAILING_STOP'; // fallback
+          }
+        } else {
+          // Before target, only hard stop triggers (already handled above)
+          signal = outlook === 'NETRAL / SIDEWAYS' ? 'OUTLOOK_NEUTRAL' : 'OUTLOOK_TURNED_DOWN';
+        }
+        if (targetReached && outlook === 'CENDERUNG NAIK' && stopTriggered && !hardStopTriggered) {
           this.persist();
           return { action: null, reason: 'Trailing stop 5% tercapai, tetapi outlook masih naik; posisi ditahan.' };
         }
@@ -118,7 +140,7 @@ export function formatAltcoinPaperTrade(trade, report = null) {
     `🟢 JUAL ${trade.symbol.toUpperCase()}/IDR`,
     `├─ Harga jual: Rp${price}`,
     `├─ Hasil vs entry: ${(trade.profitPct ?? 0) >= 0 ? '+' : ''}${(trade.profitPct ?? 0).toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`,
-    `├─ Pemicu: ${{ ENTRY_STOP: 'turun 5% dari entry', TRAILING_STOP: 'turun 5% dari puncak', OUTLOOK_NEUTRAL: 'outlook menjadi netral', OUTLOOK_TURNED_DOWN: 'outlook berbalik turun' }[trade.signal] ?? trade.signal}`,
+    `├─ Pemicu: ${{ ENTRY_STOP: 'turun 5% dari entry', TRAILING_STOP: 'turun 5% dari puncak', HARD_STOP_5PCT: 'HARD STOP 5% dari entry (selalu aktif)', OUTLOOK_NEUTRAL: 'outlook menjadi netral', OUTLOOK_TURNED_DOWN: 'outlook berbalik turun' }[trade.signal] ?? trade.signal}`,
     `└─ P/L simulasi: ${trade.realizedPnl >= 0 ? '+' : '-'}${money(Math.abs(trade.realizedPnl))}`,
     '',
     'Simulasi saja — cek /paper untuk laporan lengkap',

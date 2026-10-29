@@ -10,12 +10,13 @@ const STOP_LOSS_PCT = 5;
 const TRAILING_STOP_PCT = 5;
 
 export class LiveAltcoinTracker {
-  constructor({ api, startingCash = 31000, fraction = 0.25, stopDropPct = 5, cooldownMs = COOLDOWN_MS, state = null, save = null, orderControl = null, auditFile = null, maxDeviationPct = 2, getMarketPrice = async () => null, sendAlert = async () => { } } = {}) {
-    if (!(startingCash > 0) || !(fraction > 0 && fraction <= 1) || !(stopDropPct > 0)) throw new Error('Invalid altcoin live settings.');
+  constructor({ api, startingCash = 31000, fraction = 0.25, stopDropPct = 5, cooldownMs = COOLDOWN_MS, entryThresholdPct = 1, state = null, save = null, orderControl = null, auditFile = null, maxDeviationPct = 2, getMarketPrice = async () => null, sendAlert = async () => { } } = {}) {
+    if (!(startingCash > 0) || !(fraction > 0 && fraction <= 1) || !(stopDropPct > 0) || !(entryThresholdPct > 0)) throw new Error('Invalid altcoin live settings.');
     this.api = api;
     this.startingCash = startingCash;
     this.fraction = fraction;
     this.stopDropPct = stopDropPct;
+    this.entryThresholdPct = entryThresholdPct;
     this.cooldownMs = cooldownMs;
     this.save = save;
     this.orderControl = orderControl;
@@ -42,9 +43,18 @@ export class LiveAltcoinTracker {
 
   roundQuantity(quantity, increment) {
     if (!increment || increment <= 0) return quantity;
-    const factor = 10 ** Math.max(0, String(increment).split('.')[1]?.length ?? 0);
+    // Handle scientific notation (e.g., 1e-8) by parsing exponent
+    let factor = 1;
+    const incStr = String(increment);
+    if (incStr.includes('e-')) {
+      const exp = Number(incStr.split('e-')[1]);
+      factor = 10 ** exp;
+    } else if (incStr.includes('.')) {
+      factor = 10 ** incStr.split('.')[1].length;
+    }
     const v = Math.floor(quantity * factor + 1e-9);
     const i = Math.round(increment * factor);
+    if (i === 0) return quantity; // fallback if increment too small
     return Math.floor(v / i) * i / factor;
   }
 
@@ -294,7 +304,7 @@ export class LiveAltcoinTracker {
       return { action: null, reason: targetReached ? 'Target 1% tercapai; posisi ditahan karena outlook masih naik, dengan trailing stop 5%.' : 'Posisi dipantau; target profit 1% atau stop rugi 5% belum tercapai.' };
     }
 
-    if (!(Number.isFinite(changePct) && changePct >= 1) || trendConfirmed !== true || at < (this.state.cooldownUntil[symbol] ?? 0) || !(this.state.cash > 0)) {
+    if (!(Number.isFinite(changePct) && changePct >= this.entryThresholdPct) || trendConfirmed !== true || at < (this.state.cooldownUntil[symbol] ?? 0) || !(this.state.cash > 0)) {
       return { action: null, reason: 'Momentum atau konfirmasi tren belum cukup, masih cooldown, atau kas simulasi habis.' };
     }
 
@@ -312,8 +322,14 @@ export class LiveAltcoinTracker {
       console.error('[altcoin-live] Gagal ambil saldo real:', error.message);
     }
 
+    // Map prices: position symbols are like "BEATIDR", prices keys are like "beat"
+    const getPrice = (normSymbol) => {
+      const key = normSymbol.toLowerCase().replace(/idr$/, '');
+      return Number(prices[key]);
+    };
+
     const positions = Object.values(this.state.positions).map(position => {
-      const price = Number(prices[position.symbol]);
+      const price = getPrice(position.symbol);
       const markValue = Number.isFinite(price) && price > 0 ? Math.floor(position.quantity * price) : null;
       return { ...position, markValue, unrealizedPnl: markValue === null ? null : markValue - position.spent };
     });
@@ -328,7 +344,7 @@ export class LiveAltcoinTracker {
   }
 }
 
-export function loadLiveAltcoinTracker({ file, startingCash = 31000, fraction = 0.25, stopDropPct = 5, api, orderControl, auditFile, maxDeviationPct, getMarketPrice, sendAlert } = {}) {
+export function loadLiveAltcoinTracker({ file, startingCash = 31000, fraction = 0.25, stopDropPct = 5, entryThresholdPct = 1, api, orderControl, auditFile, maxDeviationPct, getMarketPrice, sendAlert } = {}) {
   let state = null;
   try { state = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const save = next => {
@@ -342,7 +358,7 @@ export function loadLiveAltcoinTracker({ file, startingCash = 31000, fraction = 
       throw error;
     }
   };
-  return new LiveAltcoinTracker({ startingCash, fraction, stopDropPct, state, save, api, orderControl, auditFile, maxDeviationPct, getMarketPrice, sendAlert });
+  return new LiveAltcoinTracker({ startingCash, fraction, stopDropPct, entryThresholdPct, state, save, api, orderControl, auditFile, maxDeviationPct, getMarketPrice, sendAlert });
 }
 
 export function formatLiveAltcoinTrade(trade) {
@@ -374,7 +390,7 @@ export function formatLiveAltcoinTrade(trade) {
   ].join('\n');
 }
 
-export function formatLiveAltcoinReport(report) {
+export function formatLiveAltcoinReport(report, entryThresholdPct = 1) {
   const money = value => `Rp${Math.floor(value).toLocaleString('id-ID')}`;
   const lines = ['📊 LIVE ALTCOIN TRADING', `Kas: ${money(report.cash)}`, `Ekuitas: ${money(report.equity)}`, `P/L: ${report.pnl >= 0 ? '+' : '-'}${money(Math.abs(report.pnl))}`, `Posisi terbuka: ${report.positions.length}`];
   for (const position of report.positions) {
@@ -394,6 +410,6 @@ export function formatLiveAltcoinReport(report) {
   } else {
     lines.push('Transaksi tertutup: 0 — belum ada trade yang selesai');
   }
-  lines.push('', 'Aturan: beli fixed Rp13.000 saat momentum ≥1%/15m + 3 sampel naik beruntun. Target +1%; trailing stop 5% dari puncak. Stop rugi 5% jika outlook ≠ naik. Jeda 15 menit per symbol. Fee 0.1%.', 'ORDER REAL DI INDODAX — Dicatat di logs/altcoin-orders.jsonl & altcoin-order-fail.jsonl');
+  lines.push('', `Aturan: beli fixed Rp13.000 saat momentum ≥${entryThresholdPct}%/15m + 3 sampel naik beruntun. Target +1%; trailing stop 5% dari puncak. Stop rugi 5% jika outlook ≠ naik. Jeda 15 menit per symbol. Fee 0.1%.`, 'ORDER REAL DI INDODAX — Dicatat di logs/altcoin-orders.jsonl & altcoin-order-fail.jsonl');
   return lines.join('\n');
 }

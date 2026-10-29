@@ -86,7 +86,8 @@ test('paper tracker sells virtual position on WATCH_SELL and records realized re
 test('does not simulate repeated buys while already holding a position', () => {
   const tracker = new PaperTracker({ startingCash: 50000, fraction: 0.25 });
   tracker.onSignal({ type: 'WATCH_BUY', changePct: 1.0 }, 1000000000, 1000, 'CENDERUNG NAIK');
-  assert.equal(tracker.onSignal({ type: 'WATCH_BUY', changePct: 1.0 }, 900000000, 2000, 'CENDERUNG NAIK').action, null);
+  // Price at 960M = 4% loss (doesn't trigger 5% hard stop)
+  assert.equal(tracker.onSignal({ type: 'WATCH_BUY', changePct: 1.0 }, 960000000, 2000, 'CENDERUNG NAIK').action, null);
   assert.equal(tracker.state.ledger.length, 1);
 });
 
